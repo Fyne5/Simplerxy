@@ -14,6 +14,8 @@ However, if the ISPs blocks hard IPs, it is only possible to use VPN or proxy fr
 
 ## Cách biên dịch ra nhị phân / How to build to binary
 ```
+git clone https://github.com/Fyne5/Simplerxy.git
+cd Simplerxy
 go build -o simplerxy main.go
 ```
 
@@ -25,4 +27,4 @@ go build -o simplerxy main.go
 ## Tùy biến cấu hình / Customize configuration
 Mặc định Simplerxy sẽ chạy ở cổng TCP 3979 (con số thần Tài trong Đề Số Học) và giao tiếp tại tất cả các địa chỉ (0.0.0.0). Có thể tùy chỉnh trong config.conf để cho phù hợp
 
-By default Simplerxy will run at TCP 3979 (God of Fortune) and communicate at all addresses (0.0.0.0). Can be customized in config.conf to fit
+By default Simplerxy will run at TCP 3979 (God of Fortune - the lucky number in Numerology) and communicate at all addresses (0.0.0.0). Can be customized in config.conf to fit
