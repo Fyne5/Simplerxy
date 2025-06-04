@@ -22,6 +22,7 @@ Bởi tui đang xài MacOS Intel nên khi biên dịch cơ bản, nó sẽ chỉ
 
 Because I'm using MacOS Intel, when compiling basically, it will only be for MacOS Intel. If you want to compile from MacOS Intel to another system, then
 ```
+GOOS=darwin GOARCH=amd64 go build -o Simplerxy-macos-amd64 main.go
 GOOS=darwin GOARCH=arm64 go build -o Simplerxy-macos-arm64 main.go
 GOOS=linux GOARCH=amd64 go build -o Simplerxy-linux-amd64 main.go
 GOOS=linux GOARCH=arm64 go build -o Simplerxy-linux-arm64 main.go
