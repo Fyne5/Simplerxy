@@ -1,0 +1,16 @@
+###Up
+#clear;docker-compose up -d --remove-orphans;docker-compose logs -f
+
+services:
+  simplerxy:
+    image: tquang/simplerxy:0.0.1
+    environment:
+      TZ: "Asia/Saigon"
+    ports:
+      - "3979:3979"
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_BIND_SERVICE
+    volumes:
+      - ./config.conf:/app/simplerxy/config.conf
