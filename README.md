@@ -24,6 +24,18 @@ go build -o simplerxy main.go
 ./simplerxy
 ```
 
+Khai báo trong proxy của hệ thống hoặc trình duyệt. Hay xài curl.
+
+Declare in the proxy of the system or browser. Or use curl.
+
+```
+curl -I https://medium.com -x http://127.0.0.1:3979
+HTTP/1.1 200 Connection established
+
+HTTP/2 103
+link: <https://glyph.medium.com/css/unbound.css>; as=style; rel=preload
+```
+
 ## Tùy biến cấu hình / Customize configuration
 Mặc định Simplerxy sẽ chạy ở cổng TCP 3979 (con số thần Tài trong Đề Số Học) và giao tiếp tại tất cả các địa chỉ (0.0.0.0). Có thể tùy chỉnh trong config.conf để cho phù hợp
 
