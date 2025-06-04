@@ -19,7 +19,7 @@ cd Simplerxy
 go build -o simplerxy main.go
 ```
 
-## Cách xài / Use
+## Cách xài / How to use
 ```
 ./simplerxy
 ```
@@ -28,3 +28,8 @@ go build -o simplerxy main.go
 Mặc định Simplerxy sẽ chạy ở cổng TCP 3979 (con số thần Tài trong Đề Số Học) và giao tiếp tại tất cả các địa chỉ (0.0.0.0). Có thể tùy chỉnh trong config.conf để cho phù hợp
 
 By default Simplerxy will run at TCP 3979 (God of Fortune - the lucky number in Numerology) and communicate at all addresses (0.0.0.0). Can be customized in config.conf to fit
+
+## Docker hóa cho tiện xài thông qua docker-compose.yaml / Dockerization for convenient use through docker-compose.yaml
+Đang cập nhựt...
+
+Updating...
