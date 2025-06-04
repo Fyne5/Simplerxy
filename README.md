@@ -35,6 +35,7 @@ HTTP/1.1 200 Connection established
 HTTP/2 103
 link: <https://glyph.medium.com/css/unbound.css>; as=style; rel=preload
 ```
+![Screen Shot 2025-06-04 at 11 27 35](https://github.com/user-attachments/assets/add4af1b-b60c-4008-ad82-21c36f91a4b8)
 
 ## Tùy biến cấu hình / Customize configuration
 Mặc định Simplerxy sẽ chạy ở cổng TCP 3979 (con số thần Tài trong Đề Số Học) và giao tiếp tại tất cả các địa chỉ (0.0.0.0). Có thể tùy chỉnh trong config.conf để cho phù hợp
