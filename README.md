@@ -39,9 +39,9 @@ link: <https://glyph.medium.com/css/unbound.css>; as=style; rel=preload
 ## Tùy biến cấu hình / Customize configuration
 Mặc định Simplerxy sẽ chạy ở cổng TCP 3979 (con số thần Tài trong Đề Số Học) và giao tiếp tại tất cả các địa chỉ (0.0.0.0). Có thể tùy chỉnh trong config.conf để cho phù hợp
 
-By default Simplerxy will run at TCP 3979 (God of Fortune - the lucky number in Numerology) and communicate at all addresses (0.0.0.0). Can be customized in config.conf to fit
+By default Simplerxy will run at TCP 3979 (God of Fortune’s lucky number for lottery gamblers) and communicate at all addresses (0.0.0.0). Can be customized in config.conf to fit
 
-## Docker hóa thông qua docker-compose.yaml / Dockerization through docker-compose.yaml
+## Docker bằng docker-compose.yaml / Docker with docker-compose.yaml
 Đang cập nhựt...
 
 Updating...
