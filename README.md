@@ -53,6 +53,6 @@ Mặc định Simplerxy sẽ chạy ở cổng TCP 3979 (con số thần Tài tr
 By default Simplerxy will run at TCP 3979 (God of Fortune’s lucky number for lottery gamblers) and communicate at all addresses (0.0.0.0). Can be customized in config.conf to fit
 
 ## Docker bằng docker-compose.yaml / Docker with docker-compose.yaml
-Đang cập nhựt...
+Xem trong thư mục docker rồi kích chạy RUN.sh
 
-Updating...
+Look in the docker folder and click RUN.sh
