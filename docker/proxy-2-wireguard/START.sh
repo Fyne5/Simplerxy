@@ -37,22 +37,22 @@ wg-quick up $1
 EOF
 chmod 777 Entrypoint.sh
 
-  if [[ -z `docker images | grep simplerxy-$1` ]]; then
+  if [[ -z `docker images | grep simplerxy-wireguard` ]]; then
    if [[ ! -f Simplerxy ]]; then
     wget -q https://github.com/Fyne5/Simplerxy/releases/download/0.0.1/Simplerxy-linux-amd64 -O Simplerxy
    fi
-   docker build -t simplerxy-$1 -f Dockerfile_simplerxy .
+   docker build -t simplerxy-wireguard -f Dockerfile_simplerxy .
   fi
 
   docker run -d --name $1 -p $SIMPLERXYPORT:3979 \
    --cap-add NET_ADMIN --cap-add SYS_MODULE --privileged \
    -v $WIREGUARDCONF:/etc/wireguard/$1.conf -v $SIMPLERXYCONF:/ENTRYPOINT/config.conf -v ./Entrypoint.sh:/ENTRYPOINT/Entrypoint.sh \
-   --restart unless-stopped simplerxy-$1
+   --restart unless-stopped simplerxy-wireguard
 
   echo "docker stop $1;docker rm $1;docker run -d --name $1 -p $SIMPLERXYPORT:3979 \
    --cap-add NET_ADMIN --cap-add SYS_MODULE --privileged \
    -v $WIREGUARDCONF:/etc/wireguard/$1.conf -v $SIMPLERXYCONF:/ENTRYPOINT/config.conf -v ./Entrypoint.sh:/ENTRYPOINT/Entrypoint.sh \
-   --restart unless-stopped simplerxy-$1" > DOCKER.sh
+   --restart unless-stopped simplerxy-wireguard" > DOCKER.sh
 
   rm -rf Dockerfile_simplerxy Simplerxy
 
