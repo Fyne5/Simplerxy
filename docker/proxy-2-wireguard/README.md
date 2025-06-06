@@ -27,3 +27,9 @@ From somewhere, run the following 2 curl commands to test (pretend the virtual m
 curl http://ipinfo.io/ip
 curl http://ipinfo.io/ip -x http://192.168.200.105:3979
 ```
+## Lưu ý với host chạy docker / Note for docker host
+Cần cài thêm module wireguard nếu cần. Mình đang xài Alpine Virtual 3.22 cho cả host và container nên nó có sẵn module
+
+Need to install additional wireguard module if needed. I'm using Alpine Virtual 3.22 for both host and container so it has the module available.
+
+https://www.wireguard.com/install/
