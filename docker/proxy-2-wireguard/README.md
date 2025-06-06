@@ -11,6 +11,12 @@ Edit wireguard.conf and simplerxy.conf to suit your needs. Run the container cre
 chmod +x START.sh
 ./START.sh <your container name>
 ```
+Nếu chạy nhiều container thì có thể trùng port, chỉnh sửa SIMPLERXYPORT trong START.sh
+
+If running multiple containers, there may be duplicate ports, edit SIMPLERXYPORT in START.sh
+```
+SIMPLERXYPORT=6969
+```
 
 ## Cách xài / How to use
 Từ đâu đó, chạy thử 2 lệnh curl sau để kiểm tra (giả bộ máy ảo chạy Simplerxy Wireguad có IP là 192.168.200.105)
