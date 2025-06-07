@@ -74,3 +74,6 @@ backend simplerxy
     server simplerxy-3920 192.168.20.11:3920 check
     server simplerxy-3979 192.168.20.11:3979 check backup
 ```
+Chúng ta nên tạo ra 3 cục cưng: 2 cục cưng để nối Wireguard VPN, 1 cục cưng dạng thuần Simplerxy không VPN để phòng bị lỡ khi bị sụp.
+
+We should create 3 pets: 2 pets to connect Wireguard VPN, other pet will run pure Simplerxy, non -VPN to prevent it from collapse.
