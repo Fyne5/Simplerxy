@@ -1,4 +1,4 @@
-clear
+#!/bin/bash
 
 wget https://raw.githubusercontent.com/Fyne5/Simplerxy/refs/heads/main/config.conf
 
