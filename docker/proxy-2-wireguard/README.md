@@ -77,3 +77,6 @@ backend simplerxy
 Chúng ta nên tạo ra 3 cục cưng: 2 cục cưng để nối Wireguard VPN, 1 cục cưng dạng thuần Simplerxy không VPN để phòng bị lỡ khi bị sụp.
 
 We should create 3 pets: 2 pets to connect Wireguard VPN, other pet will run pure Simplerxy, non -VPN to prevent it from collapse.
+
+## Credits
+Translated from Vietnamese to English by Google Translate
