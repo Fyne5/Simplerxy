@@ -1,7 +1,7 @@
 ## Mô tả / Describes
 Simplerxy kết hợp WireguardVPN trong từng container. Mục đích xài cho cái gì thì tự người dùng quyết định. Có thể gợi ý là: WPAD.DAT
 
-Simpler bundles Wireguard VPN in each container. What you use it for is up to you. Suggestions include: WPAD.DAT
+Simplerxy bundles Wireguard VPN in each container. What you use it for is up to you. Suggestions include: WPAD.DAT
 
 ## Cách chạy / How to run
 Chỉnh nội dung wireguard.conf và simplerxy.conf cho phù hợp các yếu tố. Chạy tạo ra container.
@@ -33,3 +33,44 @@ Cần cài thêm module wireguard nếu cần. Mình đang xài Alpine Virtual 3
 Need to install additional wireguard module if needed. I'm using Alpine Virtual 3.22 for both host and container so it has the module available.
 
 https://www.wireguard.com/install/
+
+## Có thể chạy HAproxy để cân bằng tải / Can run HAproxy for load balancing
+haproxy.cfg
+```
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    daemon
+    maxconn 256
+
+defaults
+    timeout connect 5000ms
+    timeout client 50000ms
+    timeout server 50000ms
+
+# HAproxy staus
+listen stats
+    bind *:81
+    mode http
+    stats enable
+    stats uri /haproxy?stats
+    stats refresh 10s
+    stats show-node
+
+# TCP frontend for your specific TCP backend servers
+frontend tcp_simplerxy
+    bind *:2048
+    log /dev/log local0
+    mode tcp
+    option tcplog
+    default_backend simplerxy
+
+backend simplerxy
+    mode tcp
+    balance roundrobin
+    stick on src
+    stick-table type ip size 5k expire 10m
+    server simplerxy-3919 192.168.20.11:3919 check
+    server simplerxy-3920 192.168.20.11:3920 check
+    server simplerxy-3979 192.168.20.11:3979 check backup
+```
