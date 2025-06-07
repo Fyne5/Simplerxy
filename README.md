@@ -16,7 +16,7 @@ However, if the ISPs blocks hard IPs, it is only possible to use VPN or proxy fr
 ```
 git clone https://github.com/Fyne5/Simplerxy.git
 cd Simplerxy
-go build -o simplerxy main.go
+go build -o Simplerxy main.go
 ```
 Bởi tui đang xài MacOS Intel nên khi biên dịch cơ bản, nó sẽ chỉ cho MacOS Intel. Muốn từ MacOS Intel biên dịch cho hệ khác thì
 
@@ -31,7 +31,7 @@ GOOS=linux GOARCH=386 go build -o Simplerxy-linux-386 main.go
 
 ## Cách xài / How to use
 ```
-./simplerxy
+./Simplerxy
 ```
 
 Khai báo trong proxy của hệ thống hoặc trình duyệt. Hay xài curl.
