@@ -39,7 +39,7 @@ chmod 777 Entrypoint.sh
 
   if [[ -z `docker images | grep simplerxy-wireguard` ]]; then
    if [[ ! -f Simplerxy ]]; then
-    wget -q https://github.com/Fyne5/Simplerxy/releases/download/0.0.1/Simplerxy-linux-amd64 -O Simplerxy
+    wget -q https://github.com/Fyne5/Simplerxy/releases/download/0.0.2/Simplerxy-linux-amd64 -O Simplerxy
    fi
    docker build -t simplerxy-wireguard -f Dockerfile_simplerxy .
   fi
