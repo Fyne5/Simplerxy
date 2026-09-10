@@ -1,18 +1,20 @@
 package main
 
 import (
-   "bufio" // Thu vien doc file theo tung dong
-   "fmt"
-   "io"
-   "log"
-   "net"
-   "net/http" //Cau truc phuc vu 'http.Server{}'
-   "os"
-   "strings"
-   "time"
+	"bufio"
+	"fmt"
+	"io"
+	"log"
+	"math/rand"
+	"net"
+	"net/http"
+	"os"
+	"strings"
+	"time"
 )
 
-// Dinh dang noi dung cau hinh cho config.conf
+// Định dạng nội dung cấu hình cho config.conf
+// Configuration content format for config.conf
 type Config struct {
 	ListenAddress string
 	ReadTimeout   time.Duration
@@ -20,14 +22,17 @@ type Config struct {
 	IdleTimeout   time.Duration
 }
 
-// Lay gia tri o tren (ten Config) gan vao bien toan cuc
+// Lấy giá trị ở trên (tên Config) gán vào biến toàn cục
+// Assign the value from above (Config name) to the global variable
 var config Config
 
 func main() {
-	// Lay cac gia tri tu config.conf
+	// Lấy các giá trị từ config.conf
+	// Get values from config.conf
 	loadConfig("config.conf")
 
-	// Khoi tao HTTP Server voi cac thong so tu config.conf
+	// Khởi tạo HTTP Server với các thông số từ config.conf
+	// Initialize the HTTP server with parameters from config.conf
 	server := &http.Server{
 		Addr:         config.ListenAddress,
 		ReadTimeout:  config.ReadTimeout,
@@ -42,7 +47,8 @@ func main() {
 	}
 }
 
-// Dieu huong request: CONNECT hoac HTTP thong thuong
+// Điều hướng request: CONNECT hoặc HTTP thông thường
+// Request routing: CONNECT or standard HTTP
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		handleConnect(w, r)
@@ -51,14 +57,16 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Xu ly HTTPS TUNNEL (Bypass SNI/DPI nam o day)
+// Xử lý HTTPS TUNNEL (Vượt chướng ngại vật SNI/DPI)
+// Handle HTTPS Tunnel (Bypass SNI/DPI restrictions)
 func handleConnect(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Host
 	if !strings.Contains(host, ":") {
 		host = host + ":443"
 	}
 
-	// Kết nối tới server đích (ví dụ: medium.com:443)
+	// Kết nối tới server đích
+	// Connect to the destination server
 	destConn, err := net.DialTimeout("tcp", host, 5*time.Second)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -66,7 +74,13 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer destConn.Close()
 
-	// Hijack kết nối để giành quyền điều khiển các byte thô từ HTTP Server
+	// Ép gửi gói tin TCP ngay lập tức (Tắt Nagle's Algorithm)
+	if tcpConn, ok := destConn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+	}
+
+	// Hijack kết nối
+	// Hijack connection
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
@@ -80,13 +94,16 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer clientConn.Close()
 
-	// Phản hồi cho client biết tunnel đã thông
+	// Phản hồi cho client biết đã kết nối thông suốt
+	// Respond to the client to indicate a successful connection
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
-	// 1. Chuyển tiếp dữ liệu chiều ngược từ Server đích về lại Client (Giữ nguyên bản)
+	// 1. Chuyển dữ liệu từ server đích (nơi chứa website) về lại client
+	// 1. Transfer data from the destination server (hosting the website) back to the client.
 	go io.Copy(clientConn, destConn)
 
-	// 2. Xử lý chiều đi từ Client sang Server đích để bẻ gãy gói tin chứa SNI
+	// 2. Xử lý chiều từ client sang server đích để bẻ gãy gói tin SNI
+	// 2. Handle the client-to-destination-server direction to break the SNI packet
 	buffer := make([]byte, 32*1024)
 	n, err := clientConn.Read(buffer)
 	if err != nil {
@@ -94,34 +111,49 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 0x16 đại diện cho TLS Handshake (Client Hello)
+	// 0x16 represents the TLS Handshake (Client Hello)
 	if n > 5 && buffer[0] == 0x16 {
-		// Kỹ thuật Fragmentation: Băm nhỏ 5 byte đầu (TLS Record Header) đi trước
-		_, err = destConn.Write(buffer[:5])
+		// Vị trí cắt ngẫu nhiên an toàn trong khoảng 2 đến 5 byte đầu
+		// Safe random split position within 2 to 5 bytes
+		splitPos := 2 + rand.Intn(4) // Trả về 2, 3, 4 hoặc 5
+
+		// Gửi mảnh đầu tiên
+		// Send the first fragment
+		_, err = destConn.Write(buffer[:splitPos])
 		if err != nil {
 			return
 		}
 
-		// Ru ngủ DPI nhà mạng trong 20 miligiây để nó lỡ nhịp và không ghép gói tin quét SNI
-		time.Sleep(20 * time.Millisecond)
+		// Ru ngủ với thời gian ngẫu nhiên từ 5 đến 25 ms
+		// Sleep for a random duration between 5ms to 25ms
+		// 21 - 1 = 20; 20 + 5 = 25
+		// From 10 to 20 ms: 11 - 1 = 10; 10 + 10 = 20
+		// randomSleep := time.Duration(10+rand.Intn(11)) * time.Millisecond
+		randomSleep := time.Duration(5+rand.Intn(21)) * time.Millisecond
+		time.Sleep(randomSleep)
 
-		// Gửi tiếp phần thân còn lại chứa SNI thật (medium.com)
-		_, err = destConn.Write(buffer[5:n])
+		// Gửi mảnh còn lại
+		// Send the remaining fragment
+		_, err = destConn.Write(buffer[splitPos:n])
 		if err != nil {
 			return
 		}
 	} else {
-		// Dữ liệu HTTP thường hoặc không phải TLS thì cho qua thẳng
+		// Dữ liệu HTTP thường hoặc không phải TLS thì cho qua luôn
+		// Pass through standard or non-TLS HTTP data immediately.
 		_, err = destConn.Write(buffer[:n])
 		if err != nil {
 			return
 		}
 	}
 
-	// 3. Sau khi vượt qua bước bắt tay đầu tiên, các gói dữ liệu sau cứ để io.Copy lo nốt
+	// 3. Khi xong cú bắt tay đầu tiên, chuyển tiếp các gói dữ liệu tiếp theo
+	// 3. Upon completion of the initial handshake, forward subsequent data packets
 	io.Copy(destConn, clientConn)
 }
 
-// Xử lý HTTP Proxy thông thường (không mã hóa)
+// Xử lý HTTP Proxy thông thường
+// Handle standard HTTP proxy
 func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	transport := http.DefaultTransport
 	outReq := new(http.Request)
@@ -146,9 +178,9 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-// Hàm bổ trợ đọc file config.conf của đại ca
+// Nếu file config.conf lỗi hoặc không có, thì xài tham số cố định này
+// If config.conf is faulty or missing, use this hardcoded parameter.
 func loadConfig(filepath string) {
-	// Cấu hình mặc định phòng trường hợp không đọc được file
 	config = Config{
 		ListenAddress: "0.0.0.0:3979",
 		ReadTimeout:   10 * time.Second,
