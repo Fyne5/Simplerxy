@@ -3,7 +3,7 @@
 
 services:
   simplerxy:
-    image: tquang/simplerxy:0.0.2
+    image: tquang/simplerxy:0.0.3
     environment:
       TZ: "Asia/Saigon"
     ports:

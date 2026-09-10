@@ -1,6 +1,6 @@
 #!/bin/bash
 
-BUILD_NUM="simplerxy:0.0.2"
+BUILD_NUM="simplerxy:0.0.3"
 
 cat << EOF > Dockerfile_simplerxy
 FROM alpine:3.22.0
@@ -25,7 +25,7 @@ ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 CMD ["./Simplerxy"]
 EOF
 
-wget -q https://github.com/Fyne5/Simplerxy/releases/download/0.0.2/Simplerxy-linux-amd64 -O Simplerxy
+wget -q https://github.com/Fyne5/Simplerxy/releases/download/0.0.3/Simplerxy-linux-amd64 -O Simplerxy
 docker build -t $BUILD_NUM -f Dockerfile_simplerxy .
 docker tag $BUILD_NUM tquang/$BUILD_NUM
 
