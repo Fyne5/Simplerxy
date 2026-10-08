@@ -27,6 +27,8 @@ GOOS=darwin GOARCH=arm64 go build -o Simplerxy-macos-arm64 main.go
 GOOS=linux GOARCH=amd64 go build -o Simplerxy-linux-amd64 main.go
 GOOS=linux GOARCH=arm64 go build -o Simplerxy-linux-arm64 main.go
 GOOS=linux GOARCH=386 go build -o Simplerxy-linux-386 main.go
+GOOS=windows GOARCH=amd64 go build -o Simplerxy-win-amd64.exe main.go
+GOOS=windows GOARCH=386 go build -o Simplerxy-win-386.exe main.go
 ```
 
 ## Cách xài / How to use
