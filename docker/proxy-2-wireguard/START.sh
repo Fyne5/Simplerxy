@@ -13,7 +13,7 @@ if [[ -z "$#" || "$#" -ne 1 ]]; then
 cat << EOF > Dockerfile_simplerxy
 FROM alpine:3.22.0
 RUN apk update && apk upgrade -a
-RUN apk add --no-cache iptables iproute2 wireguard-tools-wg-quick wireguard-tools-openrc curl brotli-libs dumb-init
+RUN apk add --no-cache iptables iproute2 wireguard-tools-wg-quick wireguard-tools-openrc curl brotli-libs gcompat dos2unix tzdata dumb-init
 RUN mkdir -p /ENTRYPOINT
 WORKDIR /ENTRYPOINT
 #COPY Entrypoint.sh Simplerxy .
@@ -39,7 +39,7 @@ chmod 777 Entrypoint.sh
 
   if [[ -z `docker images | grep simplerxy-wireguard` ]]; then
    if [[ ! -f Simplerxy ]]; then
-    wget -q https://github.com/Fyne5/Simplerxy/releases/download/0.0.3/Simplerxy-linux-amd64 -O Simplerxy
+    wget -q https://github.com/Fyne5/Simplerxy/releases/download/0.0.4/Simplerxy-linux-amd64 -O Simplerxy
    fi
    docker build -t simplerxy-wireguard -f Dockerfile_simplerxy .
   fi

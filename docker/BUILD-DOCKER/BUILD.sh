@@ -14,6 +14,7 @@ RUN apk update && apk upgrade -a && \
     libstdc++ \
     gcompat \
     dos2unix \
+    tzdata \
     dumb-init
 
 RUN mkdir -p /app/simplerxy

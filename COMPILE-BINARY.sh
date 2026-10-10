@@ -1,5 +1,5 @@
 #!/bin/bash
-FILE="main_0.0.3.go"
+FILE="main_0.0.4.go"
 
 rm -rf Simplerxy-*
 
