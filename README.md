@@ -58,3 +58,12 @@ By default Simplerxy will run at TCP 3979 (God of Fortune’s lucky number for l
 Xem trong thư mục docker rồi kích chạy RUN.sh
 
 Look in the docker folder and click RUN.sh
+
+## Báo cáo của VirusTotal về phiên bản Windows / Windows version VirusTotal report
+Cái này bình thường, ai không tin tưởng thì đem mã nguồn về tự biên dịch sẽ tự tin hơn.
+
+This is normal. If you don't trust it, you can compile the source code yourself for peace of mind.
+
+https://www.virustotal.com/gui/file/a24746e82c547005eadbaae81c0b04ed54b40b0d29c3d72644c2c403e60d6197
+<img width="1823" height="777" alt="Windows VirusTotal" src="https://github.com/user-attachments/assets/3c41e36d-b912-4f51-a409-b3b7d73b3ff8" />
+
