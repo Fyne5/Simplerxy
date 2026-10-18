@@ -6,11 +6,15 @@ Simplerxy - A simple, easy-to-use, lightweight proxy
 ## Mô tả / Describes
 Simplerxy - Một proxy đơn giản dễ xài, thoát tục được viết bằng Golang với sự giúp sức của Gemini. Nhu cầu chính của Simplerxy là giúp vượt lọc chặn dựa vào SNI/DPI của nhà mạng. Quan trọng: Simplerxy không chèn, làm sai lệch, cũng như không thu thập thông tin mã hóa HTTPS.
 
-Nhưng mà, nếu mấy nhà mạng chặn dựa vào IP, chỉ còn các xài VPN hay proxy của nước ngoài.
+Nhưng mà, nếu mấy nhà mạng chặn dựa vào IP, chỉ còn cách xài VPN hay proxy của nước ngoài.
+
+Hỗ trợ các phương thức proxy: HTTP, HTTPS, SOCKS5 TCP, SOCKS5 UDP.
 
 Simplerxy - A simple, easy-to-use, lightweight proxy is written in Golang with the help from Gemini. Simplerxy helps bypass SNI/DPI filters from ISPs. Important: Simplerxy does not insert, false, nor does not collect encryption information HTTPS.
 
 However, if the ISPs blocks hard IPs, it is only possible to use VPN or proxy from abroad.
+
+Support proxy's methods: HTTP, HTTPS, SOCKS5 TCP, SOCKS5 UDP.
 
 ## Cách biên dịch ra nhị phân / How to build to binary
 ```

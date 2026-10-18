@@ -2,7 +2,7 @@
 
 #How to use: ./START <NAME_CONTAINER>
 
-BUILD_NUM="0.0.4"
+BUILD_NUM="1.0.0"
 WIREGUARDCONF="./wireguard.conf"
 SIMPLERXYCONF="./simplerxy.conf"
 SIMPLERXYPORT="3979"

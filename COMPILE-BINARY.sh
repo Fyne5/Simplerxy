@@ -1,14 +1,34 @@
 #!/bin/bash
-FILE="main_0.0.4.go"
 
-rm -rf Simplerxy-*
+FILE="main_1.0.0.go"
 
-GOOS=darwin GOARCH=amd64 go build -o Simplerxy-macos-amd64 $FILE
-GOOS=darwin GOARCH=arm64 go build -o Simplerxy-macos-arm64 $FILE
-GOOS=linux GOARCH=amd64 go build -o Simplerxy-linux-amd64 $FILE
-GOOS=linux GOARCH=arm64 go build -o Simplerxy-linux-arm64 $FILE
-GOOS=linux GOARCH=386 go build -o Simplerxy-linux-386 $FILE
-GOOS=windows GOARCH=amd64 go build -o Simplerxy-win-amd64.exe $FILE
-GOOS=windows GOARCH=386 go build -o Simplerxy-win-386.exe $FILE
+rm -f Simplerxy-*
 
-chmod +x Simplerxy-*
+BUILD_FLAGS="-trimpath -ldflags=-s -ldflags=-w"
+
+PLATFORMS=(
+  "darwin/amd64/Simplerxy-macos-amd64"
+  "darwin/arm64/Simplerxy-macos-arm64"
+  "linux/amd64/Simplerxy-linux-amd64"
+  "linux/arm64/Simplerxy-linux-arm64"
+  "linux/386/Simplerxy-linux-386"
+  "windows/amd64/Simplerxy-win-amd64.exe"
+  "windows/386/Simplerxy-win-386.exe"
+)
+
+echo "Compiling..."
+
+for entry in "${PLATFORMS[@]}"; do
+  IFS="/" read -r os arch output <<< "$entry"
+  (
+    echo " -> Building $output ($os/$arch)..."
+    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build $BUILD_FLAGS -o "$output" "$FILE"
+  ) &
+done
+
+wait
+
+chmod +x Simplerxy-* 2>/dev/null
+chmod -x Simplerxy-*.exe 2>/dev/null
+
+echo "Done!"

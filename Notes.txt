@@ -1,0 +1,22 @@
+###1.0.0
+##Tiếng Việt
+Kiểm tra DNS ổn hay không, hiển thị OK hoặc FAILED
+- Kiểm tra nội bộ: Fallback > Direct IP > DoH > DoT
+- Kiểm tra cho người dùng: DoH > DoT > Direct IP > Fallback
+
+Bổ sung cache DNS, hiển thị cache DNS trong quá trình chạy
+
+Bổ sung SOCKS5 (TCP/UDP)
+- HTTP Proxy: curl -I https://medium.com -x localhost:3979
+- SOCKS5 Proxy: curl -I https://medium.com --socks5 localhost:3979
+
+##English
+Check if DNS is working properly or not, display OK or FAILED
+- Internal check: Fallback > Direct IP > DoH > DoT
+- User check: DoH > DoT > Direct IP > Fallback
+
+Add DNS caching, display DNS cache during execution
+
+Add SOCKS5 (TCP/UDP)
+- HTTP Proxy: curl -I https://medium.com -x localhost:3979
+- SOCKS5 Proxy: curl -I https://medium.com --socks5 localhost:3979
