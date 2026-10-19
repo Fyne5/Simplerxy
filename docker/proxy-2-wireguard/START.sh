@@ -2,7 +2,7 @@
 
 #How to use: ./START <NAME_CONTAINER>
 
-BUILD_NUM="1.0.0"
+BUILD_NUM="1.0.1"
 WIREGUARDCONF="./wireguard.conf"
 SIMPLERXYCONF="./simplerxy.conf"
 SIMPLERXYPORT="3979"
@@ -45,15 +45,19 @@ chmod 777 Entrypoint.sh
    docker build -t simplerxy-wireguard -f Dockerfile_simplerxy .
   fi
 
-  docker run -d --name $1 -p $SIMPLERXYPORT:3979 \
-   --cap-add NET_ADMIN --cap-add SYS_MODULE --privileged \
-   -v $WIREGUARDCONF:/etc/wireguard/$1.conf -v $SIMPLERXYCONF:/ENTRYPOINT/config.conf -v ./Entrypoint.sh:/ENTRYPOINT/Entrypoint.sh \
-   --restart unless-stopped simplerxy-wireguard
+docker run -d --name $1 --network host \
+  --cap-add NET_ADMIN --cap-add SYS_MODULE --privileged \
+  -v $WIREGUARDCONF:/etc/wireguard/$1.conf \
+  -v $SIMPLERXYCONF:/ENTRYPOINT/config.conf \
+  -v ./Entrypoint.sh:/ENTRYPOINT/Entrypoint.sh \
+  --restart unless-stopped simplerxy-wireguard
 
-  echo "docker stop $1;docker rm $1;docker run -d --name $1 -p $SIMPLERXYPORT:3979 \
-   --cap-add NET_ADMIN --cap-add SYS_MODULE --privileged \
-   -v $WIREGUARDCONF:/etc/wireguard/$1.conf -v $SIMPLERXYCONF:/ENTRYPOINT/config.conf -v ./Entrypoint.sh:/ENTRYPOINT/Entrypoint.sh \
-   --restart unless-stopped simplerxy-wireguard" > DOCKER.sh
+echo "docker stop $1; docker rm $1; docker run -d --name $1 --network host \
+  --cap-add NET_ADMIN --cap-add SYS_MODULE --privileged \
+  -v $WIREGUARDCONF:/etc/wireguard/$1.conf \
+  -v $SIMPLERXYCONF:/ENTRYPOINT/config.conf \
+  -v ./Entrypoint.sh:/ENTRYPOINT/Entrypoint.sh \
+  --restart unless-stopped simplerxy-wireguard" > DOCKER.sh
 
   rm -rf Dockerfile_simplerxy Simplerxy
 

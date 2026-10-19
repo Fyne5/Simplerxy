@@ -1,6 +1,6 @@
 #!/bin/bash
 
-FILE="main_1.0.0.go"
+FILE="main_1.0.1.go"
 
 rm -f Simplerxy-*
 

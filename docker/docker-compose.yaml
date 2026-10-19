@@ -3,14 +3,15 @@
 
 services:
   simplerxy:
-    image: tquang/simplerxy:1.0.0
+    image: tquang/simplerxy:1.0.1
+    container_name: simplerxy
     environment:
       TZ: "Asia/Saigon"
-    ports:
-      - "3979:3979"
+    network_mode: host
     restart: unless-stopped
     cap_add:
-      - NET_ADMIN
       - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
     volumes:
-      - ./config.conf:/app/simplerxy/config.conf
+      - ./config.conf:/app/simplerxy/config.conf:ro

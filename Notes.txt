@@ -1,22 +1,66 @@
-###1.0.0
+###1.0.1
 ##Tiếng Việt
-Kiểm tra DNS ổn hay không, hiển thị OK hoặc FAILED
-- Kiểm tra nội bộ: Fallback > Direct IP > DoH > DoT
-- Kiểm tra cho người dùng: DoH > DoT > Direct IP > Fallback
+Hỗ trợ IPv4 và IPv6. Mặc định ưu tiên IPv6, nếu có vấn đề thì trả về  IPv4 . Cơ chế Happy Eyeballs (RFC 8305) thu nhỏ.
+```
+curl -I https://medium.com -x localhost:3979
+curl -I https://medium.com --socks5 localhost:3979
+```
 
-Bổ sung cache DNS, hiển thị cache DNS trong quá trình chạy
+Truy vấn DNS cùng lúc cho cả IPv4/IPv6, nhưng cơ bản vẫn để logic như trên. Lý do theo dòng thời gian mà ta du ngoạn, IPv6 sẽ "tới thời".
+```
+2026/10/19 21:49:25 [DNS SUCCESS] Resolved medium.com -> [2606:4700:7::a29f:9804 2606:4700:7::a29f:9904 162.159.153.4 162.159.152.4] via DoH (https://cloudflare-dns.com/dns-query)
+2026/10/19 21:49:25 [DNS CACHE STORE] Cached medium.com -> [2606:4700:7::a29f:9804 2606:4700:7::a29f:9904 162.159.153.4 162.159.152.4] (Exp: 1m0s)
+2026/10/19 21:49:25 [HTTP CONNECT] Established connection to medium.com:443 (162.159.153.4:443)
+2026/10/19 21:49:38 [DNS CACHE HIT] Resolved medium.com -> [2606:4700:7::a29f:9804 2606:4700:7::a29f:9904 162.159.153.4 162.159.152.4] from cache
+```
 
-Bổ sung SOCKS5 (TCP/UDP)
-- HTTP Proxy: curl -I https://medium.com -x localhost:3979
-- SOCKS5 Proxy: curl -I https://medium.com --socks5 localhost:3979
+Chặn giả mạo DNS (DNS Spoofing). Chuyển việc sinh Transaction ID sang dùng crypto/rand (bảo mật) kết hợp kiểm tra biên mảng an toàn trong hàm parseDNSResponse, vô hiệu hóa trò chèn ép kết quả phân giải của nhà mạng.
+
+UDP relay được gán đúng IP cấu hình và chỉ chấp nhận gói tin từ đúng IP của client đã thiết lập phiên TCP trước đó; chặn tình trạng gói tin rác, giả mạo
+
+Bổ sung chỉ cho phép client IP nào được xài proxy trong `config.conf`.
+```
+clientAllowlist: 127.0.0.1; 192.168.0.0/16; ::1
+```
+
+Chặn truy cập ngược từ ngoài vào proxy, rồi từ proxy truy về IP local
+```
+allowPrivateIP: no
+```
+
+Sửa lỗi DNS cache chỉ đánh dấu là hết hạn mà chưa dọn dẹp
+
+Tối ưu hóa hiệu năng và vài thứ khác
 
 ##English
-Check if DNS is working properly or not, display OK or FAILED
-- Internal check: Fallback > Direct IP > DoH > DoT
-- User check: DoH > DoT > Direct IP > Fallback
+Supports IPv4 and IPv6. IPv6 is preferred by default, falling back to IPv4 if any issues occur. Implements the Happy Eyeballs mechanism (RFC 8305).
+```
+curl -I https://medium.com -x localhost:3979
+curl -I https://medium.com --socks5 localhost:3979
+```
 
-Add DNS caching, display DNS cache during execution
+Queries DNS for both IPv4/IPv6 simultaneously, while keeping the core logic as described above. As time goes on, IPv6's time has come.
+```
+2026/10/19 21:49:25 [DNS SUCCESS] Resolved medium.com -> [2606:4700:7::a29f:9804 2606:4700:7::a29f:9904 162.159.153.4 162.159.152.4] via DoH (https://cloudflare-dns.com/dns-query)
+2026/10/19 21:49:25 [DNS CACHE STORE] Cached medium.com -> [2606:4700:7::a29f:9804 2606:4700:7::a29f:9904 162.159.153.4 162.159.152.4] (Exp: 1m0s)
+2026/10/19 21:49:25 [HTTP CONNECT] Established connection to medium.com:443 (162.159.153.4:443)
+2026/10/19 21:49:38 [DNS CACHE HIT] Resolved medium.com -> [2606:4700:7::a29f:9804 2606:4700:7::a29f:9904 162.159.153.4 162.159.152.4] from cache
+```
 
-Add SOCKS5 (TCP/UDP)
-- HTTP Proxy: curl -I https://medium.com -x localhost:3979
-- SOCKS5 Proxy: curl -I https://medium.com --socks5 localhost:3979
+Mitigates DNS spoofing. Switched Transaction ID generation to use crypto/rand for security, combined with safe array bounds checking in parseDNSResponse to neutralize ISP DNS pollution/injection.
+
+Bound UDP relay to the configured IP, and strictly accept packets only from the exact client IP that established the prior TCP session; blocks spam and spoofed packets.
+
+Added client IP allowlisting for proxy usage via `config.conf`:
+```
+clientAllowlist: 127.0.0.1; 192.168.0.0/16; ::1
+```
+
+Blocked reflection/SSRF attempts where external traffic accesses the proxy and routes back to local IPs:
+```
+allowPrivateIP: no
+```
+
+Fixed a bug where DNS cache entries were only marked as expired without being cleaned up.
+
+Performance optimizations and various minor improvements.
