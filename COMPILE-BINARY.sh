@@ -1,6 +1,12 @@
 #!/bin/bash
 
-FILE="main_1.0.1.go"
+FILE="main_1.0.2.go"
+
+if [ "$1" == "run" ]; then
+    echo "Running debug with race detector..."
+    CGO_ENABLED=1 go run --race "$FILE" --config config.conf
+    exit 0
+fi
 
 rm -f Simplerxy-*
 
