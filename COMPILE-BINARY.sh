@@ -1,6 +1,6 @@
 #!/bin/bash
 
-FILE="main_1.0.2.go"
+FILE="main_1.0.3.go"
 
 if [ "$1" == "run" ]; then
     echo "Running debug with race detector..."

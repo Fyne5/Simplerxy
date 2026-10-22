@@ -28,55 +28,55 @@ import (
 	"time"
 )
 
-// Khai báo các hằng số tinh chỉnh hạ tầng nội bộ (Hard-coded system tuning constants)
 const (
-	version = "1.0.2"
+	version = "1.0.3"
 
-	defaultDialTimeout                    = 5 * time.Second  // Thời gian chờ kết nối TCP ra máy chủ đích / TCP Dial connection timeout
-	defaultDNSTimeout                     = 5 * time.Second  // Thời gian chờ truy vấn UDP DNS / UDP DNS query timeout
-	defaultDoXTimeout                     = 3 * time.Second  // Thời gian chờ DoH/DoT timeout / DoH/DoT timeout
-	defaultTransportResponseHeaderTimeout = 30 * time.Second // Thời gian chờ nhận HTTP Response Header / HTTP Response Header timeout
-	defaultTransportIdleConnTimeout       = 90 * time.Second // Thời gian duy trì kết nối rỗi trong HTTP Transport pool / HTTP Transport idle connection pool timeout
-
-	happyEyeballsDelay   = 250 * time.Millisecond // Độ trễ so le giữa các lần thử IP (Happy Eyeballs) / Stagger delay between IP dial attempts
-	acceptErrorBackoff   = 100 * time.Millisecond // Thời gian nghỉ khi Accept lỗi liên tục / Backoff delay on Accept error
-	udpTargetIdleTimeout = 30 * time.Second       // Thời gian hết hạn socket UDP ngoài / Outbound UDP socket idle limit
-	udpWriteTimeout      = 10 * time.Second       // Thời gian ghi UDP / UDP write timeout
-	maxUDPTargets        = 256                    // Số socket UDP đích tối đa mỗi association / Max outbound UDP sockets per association
-	maxConcurrentConns   = 8192                   // Số kết nối đồng thời tối đa / Max concurrent connections
-	maxHeaderBytes       = 64 * 1024              // Giới hạn header giai đoạn handshake 64KB / 64KB header limit during handshake
+	defaultDialTimeout                    = 5 * time.Second
+	defaultDNSTimeout                     = 5 * time.Second
+	defaultDoXTimeout                     = 3 * time.Second
+	defaultTransportResponseHeaderTimeout = 30 * time.Second
+	defaultTransportIdleConnTimeout       = 90 * time.Second
+	happyEyeballsDelay   = 250 * time.Millisecond
+	acceptErrorBackoff   = 100 * time.Millisecond
+	udpTargetIdleTimeout = 30 * time.Second
+	udpWriteTimeout      = 10 * time.Second
+	maxUDPTargets        = 256
+	maxConcurrentConns   = 8192
+	maxHeaderBytes       = 64 * 1024
 )
 
-// Định nghĩa cấu trúc lưu trữ toàn bộ tham số cấu hình hệ thống proxy
-// Configuration structure storing all system proxy parameters
-type Config struct {
-	LogShow         bool
-	ListenAddress   string
-	ReadTimeout     time.Duration // Giai đoạn handshake: thời gian chờ mỗi lần đọc / Handshake: per-read timeout
-	WriteTimeout    time.Duration // Thời gian chờ mỗi lần ghi / Per-write timeout
-	IdleTimeout     time.Duration // Tunnel: đóng kết nối khi cả 2 chiều im lặng / Tunnel: close if both directions silent
-	ClientTimeout   time.Duration // Giai đoạn handshake: tổng thời gian tối đa / Handshake overall deadline
-	DNSFallback     string
-	DNSIP           string
-	DNSDOH          string
-	DNSDOT          string
-	DNSCache        bool
-	DNSCacheSize    int64
-	DNSCacheExp     time.Duration
-	ClientAllowlist string
-	AllowPrivateIP  bool
+var hopByHopHeaders = []string{
+	"Connection", "Keep-Alive", "Proxy-Authenticate",
+	"Proxy-Authorization", "Proxy-Connection", "Te",
+	"Trailer", "Transfer-Encoding", "Upgrade",
 }
 
-// Cấu trúc lưu trữ bản ghi DNS Cache kèm thời gian hết hạn và kích thước
-// DNS Cache record structure with expiration time and size
+type Config struct {
+	LogShow          bool
+	ListenAddress    string
+	ReadTimeout      time.Duration
+	WriteTimeout     time.Duration
+	IdleTimeout      time.Duration
+	ClientTimeout    time.Duration
+	DNSFallback      string
+	DNSIP            string
+	DNSDOH           string
+	DNSDOT           string
+	DNSCache         bool
+	DNSCacheSize     int64
+	DNSCacheExp      time.Duration
+	ClientAllowlist  string
+	AllowPrivateIP   bool
+	AllowPrivateDest string
+}
+
 type DNSCacheItem struct {
 	IPs        []string
 	ExpireTime time.Time
 	Size       int64
-	elem       *list.Element // vị trí trong hàng đợi FIFO
+	elem       *list.Element
 }
 
-// Cấu trúc Singleflight thuần Standard Library (Zero External Dependencies)
 type dnsCall struct {
 	wg  sync.WaitGroup
 	val []string
@@ -103,8 +103,7 @@ func (g *miniSingleflight) Do(key string, fn func() ([]string, error)) ([]string
 	g.m[key] = c
 	g.mu.Unlock()
 
-	// Sử dụng defer để đảm bảo luôn gọi wg.Done và xóa key khỏi map ngay cả khi fn() panic
-	// Use defer to ensure wg.Done and map cleanup even if fn() panics
+	// Bảo đảm an toàn khi fn() panic
 	defer func() {
 		c.wg.Done()
 		g.mu.Lock()
@@ -117,15 +116,11 @@ func (g *miniSingleflight) Do(key string, fn func() ([]string, error)) ([]string
 }
 
 var (
-	// Bộ nhớ cache DNS toàn cục và cơ chế khóa đồng thời
-	// Global DNS cache storage and concurrency locking mechanism
 	dnsCacheStore    = make(map[string]DNSCacheItem)
 	dnsCacheMutex    sync.RWMutex
 	currentCacheSize int64
-	dnsGroup         miniSingleflight // Chống tháo khoán truy vấn DNS trùng nhau (Singleflight DNS deduplication)
+	dnsGroup         miniSingleflight
 
-	// Khai báo Buffer Pool dùng pointer *[]byte để tránh alloc bộ nhớ khi Put
-	// Global Buffer Pool using *[]byte to prevent interface allocation overhead on Put
 	bufferPool = sync.Pool{
 		New: func() interface{} {
 			b := make([]byte, 32*1024)
@@ -133,24 +128,17 @@ var (
 		},
 	}
 
-	// Semaphore giới hạn tối đa kết nối đồng thời để bảo vệ File Descriptors
-	// Semaphore limiting up to max concurrent connections to protect File Descriptors
 	maxConnsChan = make(chan struct{}, maxConcurrentConns)
 
-	// Transport dùng chung cho HTTP requests
-	// Shared Transport for HTTP requests
 	httpTransport *http.Transport
-	dohClient     = &http.Client{Timeout: defaultDoXTimeout}
+	dohClient     *http.Client
 
-	// Allowlist đã biên dịch sẵn tối ưu tốc độ kiểm tra
-	// Precompiled allowlist for fast lookup
-	allowAll  bool
-	allowNets []*net.IPNet
+	allowAll             bool
+	allowNets            []*net.IPNet
+	allowPrivateDestNets []*net.IPNet
 
 	errBlockedDestination = errors.New("destination not allowed")
 
-	// Dải mạng nội bộ và dải đặc biệt chặn truy cập ngoài ý muốn
-	// Private and special-purpose network ranges for security check
 	privateNets = func() []*net.IPNet {
 		cidrs := []string{
 			"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
@@ -168,29 +156,24 @@ var (
 	}()
 )
 
-// Biến cấu hình toàn cục của ứng dụng
-// Global application configuration variable
+var errUnsupportedAtyp = errors.New("unsupported atyp")
+
 var config Config
 
 func main() {
 	configPath := flag.String("config", "config.conf", "path to config file")
 	flag.Parse()
 
-	// Tải file cấu hình từ đường dẫn linh hoạt
-	// Load configuration values from resolved path
 	loadConfig(resolveConfigPath(*configPath))
 	compileAllowlist()
+	compileAllowPrivateDest()
 	initHTTPTransport()
 
-	// Lắng nghe TCP trên ListenAddress hỗ trợ cả IPv4 và IPv6 (True Dual-stack)
-	// Listen on TCP supporting both IPv4 and IPv6 (True Dual-stack)
 	listener, err := net.Listen("tcp", config.ListenAddress)
 	if err != nil {
 		log.Fatalf("Can not start the server: %v", err)
 	}
 
-	// Thoát nhanh khi nhận tín hiệu ngắt (Ctrl+C hoặc Docker stop)
-	// Exit immediately upon receiving termination signals
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -202,17 +185,13 @@ func main() {
 	log.Printf("Log show status: %v\n", config.LogShow)
 	log.Printf("Timeouts -> Read(handshake): %v, Write: %v, Idle(tunnel): %v, Client(handshake): %v\n", config.ReadTimeout, config.WriteTimeout, config.IdleTimeout, config.ClientTimeout)
 	log.Printf("DNS Cache status: %v (Size limit: %d bytes, Expire: %v)\n", config.DNSCache, config.DNSCacheSize, config.DNSCacheExp)
-	log.Printf("Client Allowlist: [%s], Allow Private IP: %v\n", config.ClientAllowlist, config.AllowPrivateIP)
+	log.Printf("Client Allowlist: [%s], Allow Private Dest: [%s], Allow Private IP: %v\n", config.ClientAllowlist, config.AllowPrivateDest, config.AllowPrivateIP)
 	if allowAll {
 		log.Printf("[WARNING] clientAllowlist is empty or '*': anyone who can reach %s can use this proxy\n", config.ListenAddress)
 	}
 
-	// Thực hiện kiểm tra sức khỏe DNS nội bộ khởi động
-	// Run initial internal DNS health check
 	runClientDNSHealthCheckWithInternal("google.com")
 
-	// Vòng lặp chấp nhận kết nối từ client
-	// Accept incoming connections loop
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -254,9 +233,9 @@ func main() {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Khởi tạo Transport, Allowlist & Kiểm tra IP (Transport, Allowlist & Private IP)
-// ---------------------------------------------------------------------------
+// ---------------------------------
+// Transport, Allowlist & Private IP
+// ---------------------------------
 
 func initHTTPTransport() {
 	httpTransport = &http.Transport{
@@ -278,6 +257,50 @@ func initHTTPTransport() {
 		ResponseHeaderTimeout: defaultTransportResponseHeaderTimeout,
 		IdleConnTimeout:       defaultTransportIdleConnTimeout,
 	}
+
+	dohClient = &http.Client{
+		Timeout: defaultDoXTimeout,
+		Transport: &http.Transport{
+			Proxy:               nil,
+			TLSHandshakeTimeout: defaultDoXTimeout,
+			MaxIdleConnsPerHost: 2,
+			IdleConnTimeout:     defaultTransportIdleConnTimeout,
+			ForceAttemptHTTP2:   true,
+		},
+	}
+}
+
+func parseIPNets(listStr string) []*net.IPNet {
+	var nets []*net.IPNet
+	list := strings.TrimSpace(listStr)
+	if list == "" {
+		return nil
+	}
+	list = strings.ReplaceAll(list, ",", ";")
+	for _, rule := range strings.Split(list, ";") {
+		rule = strings.TrimSpace(rule)
+		if rule == "" {
+			continue
+		}
+		if strings.Contains(rule, "/") {
+			_, n, err := net.ParseCIDR(rule)
+			if err != nil {
+				log.Printf("[CONFIG] invalid CIDR: %q\n", rule)
+				continue
+			}
+			nets = append(nets, n)
+		} else if ip := net.ParseIP(rule); ip != nil {
+			bits := 128
+			if ip4 := ip.To4(); ip4 != nil {
+				ip = ip4
+				bits = 32
+			}
+			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+		} else {
+			log.Printf("[CONFIG] invalid IP: %q\n", rule)
+		}
+	}
+	return nets
 }
 
 func compileAllowlist() {
@@ -288,32 +311,27 @@ func compileAllowlist() {
 		return
 	}
 	allowAll = false
-	list = strings.ReplaceAll(list, ",", ";")
-	for _, rule := range strings.Split(list, ";") {
-		rule = strings.TrimSpace(rule)
-		if rule == "" {
-			continue
-		}
-		if strings.Contains(rule, "/") {
-			_, n, err := net.ParseCIDR(rule)
-			if err != nil {
-				log.Printf("[CONFIG] invalid CIDR in clientAllowlist: %q\n", rule)
-				continue
-			}
-			allowNets = append(allowNets, n)
-		} else if ip := net.ParseIP(rule); ip != nil {
-			bits := 128
-			if ip4 := ip.To4(); ip4 != nil {
-				ip = ip4
-				bits = 32
-			}
-			allowNets = append(allowNets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
-		} else {
-			log.Printf("[CONFIG] invalid IP in clientAllowlist: %q\n", rule)
-		}
-	}
+	allowNets = parseIPNets(config.ClientAllowlist)
 	if len(allowNets) == 0 {
 		log.Printf("[WARNING] clientAllowlist has no valid entries: every client will be rejected\n")
+	}
+}
+
+func compileAllowPrivateDest() {
+	allowPrivateDestNets = nil
+	if config.AllowPrivateIP {
+		return
+	}
+	
+	// Nếu trong cấu hình rỗng thì in thông báo ra
+	if strings.TrimSpace(config.AllowPrivateDest) == "" {
+		log.Printf("[CONFIG] allowPrivateDest is empty: no private IP destinations are allowed\n")
+		return
+	}
+
+	allowPrivateDestNets = parseIPNets(config.AllowPrivateDest)
+	if len(allowPrivateDestNets) == 0 {
+		log.Printf("[WARNING] allowPrivateDest has no valid CIDRs/IPs configured\n")
 	}
 }
 
@@ -358,8 +376,27 @@ func isPrivateIP(ipStr string) bool {
 	return false
 }
 
+func isIPAllowed(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	if !isPrivateIP(ipStr) {
+		return true
+	}
+	if config.AllowPrivateIP {
+		return true
+	}
+	for _, n := range allowPrivateDestNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------------------------------------------------------------------------
-// Quản lý Deadline Kết nối & Kênh Closed (Connection Wrapper & Closed Notification)
+// Quản lý Deadline Kết nối & Kênh Closed
 // ---------------------------------------------------------------------------
 
 type timeoutConn struct {
@@ -370,7 +407,7 @@ type timeoutConn struct {
 	tunnel       atomic.Bool
 	noIdle       atomic.Bool
 	hsTimer      *time.Timer
-	closed       chan struct{} // Kênh báo hiệu kết nối đã ngắt / Channel notifying connection closure
+	closed       chan struct{}
 	closeOnce    sync.Once
 }
 
@@ -439,7 +476,6 @@ func (c *timeoutConn) enterTunnel() {
 	c.noIdle.Store(false)
 }
 
-// Bộ giới hạn đọc có thể nâng cấp hạn mức (Liftable Limit Reader)
 type liftableLimit struct {
 	r io.Reader
 	n int64
@@ -471,8 +507,6 @@ func (c *peekReaderConn) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
 }
 
-// Ghi đè enterTunnel để gỡ bỏ giới hạn 64KB khi vào trạng thái tunnel/truyền tải
-// Override enterTunnel to lift the 64KB limit when entering tunnel/relay state
 func (c *peekReaderConn) enterTunnel() {
 	if c.limit != nil {
 		c.limit.lift()
@@ -493,8 +527,6 @@ func closeWrite(c net.Conn) {
 type onlyWriter struct{ io.Writer }
 type onlyReader struct{ io.Reader }
 
-// Cấu trúc bọc net.Conn kèm bufio.Reader để bảo toàn dữ liệu dư trong buffer sau handshake
-// Buffered connection wrapper to preserve buffered data in bufio.Reader after handshake
 type bufferedConn struct {
 	net.Conn
 	r *bufio.Reader
@@ -560,8 +592,6 @@ func handleIncomingConnection(clientConn net.Conn) {
 		go watchIdle(tConn, done)
 	}
 
-	// Sử dụng liftableLimit để giới hạn 64KB giai đoạn handshake, sau đó gỡ bỏ khi vào tunnel
-	// Use liftableLimit to restrict 64KB during handshake phase, then lift it when entering tunnel
 	lim := &liftableLimit{r: tConn, n: maxHeaderBytes}
 	br := bufio.NewReader(lim)
 	firstByte, err := br.Peek(1)
@@ -583,7 +613,7 @@ func handleIncomingConnection(clientConn net.Conn) {
 }
 
 // ---------------------------------------------------------------------------
-// Happy Eyeballs & Kết nối Đích (Happy Eyeballs Dialing)
+// Happy Eyeballs & Kết nối Đích
 // ---------------------------------------------------------------------------
 
 func interleaveFamilies(ips []string) []string {
@@ -613,7 +643,7 @@ func interleaveFamilies(ips []string) []string {
 func dialWithFallback(ips []string, port string) (net.Conn, string, error) {
 	cands := make([]string, 0, len(ips))
 	for _, ip := range ips {
-		if !config.AllowPrivateIP && isPrivateIP(ip) {
+		if !isIPAllowed(ip) {
 			continue
 		}
 		cands = append(cands, ip)
@@ -695,14 +725,8 @@ func dialWithFallback(ips []string, port string) (net.Conn, string, error) {
 	return nil, "", lastErr
 }
 
-func setNoDelay(c net.Conn) {
-	if tc, ok := c.(*net.TCPConn); ok {
-		tc.SetNoDelay(true)
-	}
-}
-
 // ---------------------------------------------------------------------------
-// Cơ chế Tunnel & Xử lý Buffer Pool Pointer (Safe Tunnel & Buffer Pool Pointer)
+// Cơ chế Tunnel & Xử lý Buffer Pool Pointer
 // ---------------------------------------------------------------------------
 
 func writeFirstChunk(dest net.Conn, data []byte) error {
@@ -752,7 +776,7 @@ func tunnel(client *peekReaderConn, dest net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	go func() { // Chiều về: dest -> client
+	go func() {
 		defer wg.Done()
 		defer recoverAndKill("tunnel dest->client", killBoth)
 		if _, err := io.CopyBuffer(onlyWriter{client}, onlyReader{dest}, bufDown); err != nil {
@@ -762,7 +786,7 @@ func tunnel(client *peekReaderConn, dest net.Conn) {
 		closeWrite(client)
 	}()
 
-	go func() { // Chiều đi: client -> dest
+	go func() {
 		defer wg.Done()
 		defer recoverAndKill("tunnel client->dest", killBoth)
 		if err := copyClientToDest(client, dest, bufUp); err != nil {
@@ -779,7 +803,7 @@ func tunnel(client *peekReaderConn, dest net.Conn) {
 }
 
 // ---------------------------------------------------------------------------
-// Xử lý HTTP Proxy (HTTP Proxy Handlers)
+// Xử lý HTTP Proxy
 // ---------------------------------------------------------------------------
 
 func writeHTTPError(w io.Writer, code int) {
@@ -794,17 +818,11 @@ func removeHopByHop(h http.Header) {
 			}
 		}
 	}
-	for _, name := range []string{
-		"Connection", "Keep-Alive", "Proxy-Authenticate",
-		"Proxy-Authorization", "Proxy-Connection", "Te",
-		"Trailer", "Transfer-Encoding", "Upgrade",
-	} {
+	for _, name := range hopByHopHeaders {
 		h.Del(name)
 	}
 }
 
-// Hàm xóa hop-by-hop bổ sung Keep-Alive và giữ lại Upgrade/Connection cho WebSocket
-// Remove hop-by-hop headers including Keep-Alive and keep Upgrade/Connection for WebSocket
 func removeHopByHopKeepUpgrade(h http.Header) {
 	for _, f := range h["Connection"] {
 		for _, name := range strings.Split(f, ",") {
@@ -813,10 +831,10 @@ func removeHopByHopKeepUpgrade(h http.Header) {
 			}
 		}
 	}
-	for _, name := range []string{
-		"Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Proxy-Connection", "Te", "Trailer", "Transfer-Encoding",
-	} {
-		h.Del(name)
+	for _, name := range hopByHopHeaders {
+		if !strings.EqualFold(name, "Upgrade") && !strings.EqualFold(name, "Connection") {
+			h.Del(name)
+		}
 	}
 	if h.Get("Connection") == "" {
 		h.Set("Connection", "Upgrade")
@@ -862,7 +880,6 @@ func handleConnectDirect(c *peekReaderConn, rawTarget string) {
 		return
 	}
 	defer destConn.Close()
-	setNoDelay(destConn)
 
 	if _, err := c.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		return
@@ -881,8 +898,6 @@ func handleHTTPDirect(c *peekReaderConn, req *http.Request) {
 		return
 	}
 
-	// Kiểm tra nếu là yêu cầu WebSocket (ws:// hoặc có header Upgrade: websocket)
-	// Check if it's a WebSocket request (ws:// or has Upgrade: websocket header)
 	isWS := strings.EqualFold(req.URL.Scheme, "ws") || strings.EqualFold(req.Header.Get("Upgrade"), "websocket")
 	if isWS {
 		handleWebSocketDirect(c, req)
@@ -958,10 +973,7 @@ func handleWebSocketDirect(c *peekReaderConn, req *http.Request) {
 		return
 	}
 	defer destConn.Close()
-	setNoDelay(destConn)
 
-	// Canh c.closed để hủy destConn ngay lập tức nếu client đóng hoặc idle timeout
-	// Watch c.closed to force-close destConn if client disconnects or idle timeout triggers
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -985,8 +997,6 @@ func handleWebSocketDirect(c *peekReaderConn, req *http.Request) {
 		return
 	}
 
-	// Đặt timeout đọc response handshake để tránh bị treo vô hạn nếu upstream im lặng
-	// Set read deadline for handshake response to prevent indefinite hanging
 	destConn.SetReadDeadline(time.Now().Add(defaultTransportResponseHeaderTimeout))
 	respReader := bufio.NewReader(destConn)
 	resp, err := http.ReadResponse(respReader, req)
@@ -996,8 +1006,6 @@ func handleWebSocketDirect(c *peekReaderConn, req *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Xóa deadline trước khi bước vào giai đoạn đọc Body hoặc Tunnel
-	// Clear deadline before entering Body reading or Tunnel state
 	destConn.SetReadDeadline(time.Time{})
 
 	if err := resp.Write(c); err != nil {
@@ -1009,18 +1017,45 @@ func handleWebSocketDirect(c *peekReaderConn, req *http.Request) {
 	}
 
 	if resp.StatusCode == http.StatusSwitchingProtocols {
-		// Bọc destConn với bufferedConn chứa respReader để tránh mất dữ liệu buffer dư sau handshake
-		// Wrap destConn with bufferedConn containing respReader to prevent losing buffered post-handshake data
 		tunnel(c, &bufferedConn{Conn: destConn, r: respReader})
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Xử lý Giao thức SOCKS5 (SOCKS5 Protocol Handlers)
+// Xử lý Giao thức SOCKS5
 // ---------------------------------------------------------------------------
 
 func socks5Reply(w io.Writer, rep byte) {
 	w.Write([]byte{0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+}
+
+func readSocks5Address(r io.Reader, atyp byte) (string, error) {
+	switch atyp {
+	case 0x01:
+		b := make([]byte, 4)
+		if _, err := io.ReadFull(r, b); err != nil {
+			return "", err // Lỗi I/O / ngắt kết nối
+		}
+		return net.IP(b).String(), nil
+	case 0x03:
+		l := make([]byte, 1)
+		if _, err := io.ReadFull(r, l); err != nil {
+			return "", err
+		}
+		d := make([]byte, int(l[0]))
+		if _, err := io.ReadFull(r, d); err != nil {
+			return "", err
+		}
+		return string(d), nil
+	case 0x04:
+		b := make([]byte, 16)
+		if _, err := io.ReadFull(r, b); err != nil {
+			return "", err
+		}
+		return net.IP(b).String(), nil
+	default:
+		return "", errUnsupportedAtyp // Trả về lỗi chuẩn cho atyp lạ
+	}
 }
 
 func handleSocks5Direct(c *peekReaderConn) {
@@ -1063,34 +1098,11 @@ func handleSocks5Direct(c *peekReaderConn) {
 		return
 	}
 
-	var host string
-	switch atyp {
-	case 0x01: // IPv4
-		b := make([]byte, 4)
-		if _, err := io.ReadFull(c, b); err != nil {
-			return
+	host, err := readSocks5Address(c, atyp)
+	if err != nil {
+		if !errors.Is(err, errUnsupportedAtyp) {
+			return 
 		}
-		host = net.IP(b).String()
-
-	case 0x03: // Domain
-		l := make([]byte, 1)
-		if _, err := io.ReadFull(c, l); err != nil {
-			return
-		}
-		d := make([]byte, int(l[0]))
-		if _, err := io.ReadFull(c, d); err != nil {
-			return
-		}
-		host = string(d)
-
-	case 0x04: // IPv6
-		b := make([]byte, 16)
-		if _, err := io.ReadFull(c, b); err != nil {
-			return
-		}
-		host = net.IP(b).String()
-
-	default:
 		socks5Reply(c, 0x08)
 		return
 	}
@@ -1128,7 +1140,6 @@ func handleSocks5Direct(c *peekReaderConn) {
 		return
 	}
 	defer destConn.Close()
-	setNoDelay(destConn)
 
 	if _, err := c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
@@ -1199,10 +1210,14 @@ func handleSocks5UDP(c *peekReaderConn) {
 	}
 
 	var (
-		udpConns      = make(map[string]*net.UDPConn)
-		udpConnsMutex sync.Mutex
-		clientUDPAddr atomic.Pointer[net.UDPAddr]
-		allowedByHost = make(map[string][]string)
+		udpConns           = make(map[string]*net.UDPConn)
+		udpConnsMutex      sync.Mutex
+		clientUDPAddr      atomic.Pointer[net.UDPAddr]
+		allowedByHostMutex sync.Mutex
+		allowedByHost      = make(map[string]struct {
+			cands      []string
+			expireTime time.Time
+		})
 	)
 	defer func() {
 		udpConnsMutex.Lock()
@@ -1304,22 +1319,71 @@ func handleSocks5UDP(c *peekReaderConn) {
 		payload := buf[headerLen:n]
 		portStr := strconv.Itoa(int(destPort))
 
-		cands, cached := allowedByHost[targetHost]
-		if !cached {
+		allowedByHostMutex.Lock()
+		entry, cached := allowedByHost[targetHost]
+		now := time.Now()
+		hasValidCache := cached && now.Before(entry.expireTime)
+		allowedByHostMutex.Unlock()
+
+		var cands []string
+		if hasValidCache {
+			cands = entry.cands
+		} else {
 			ips, rerr := resolveDomainPriority(targetHost)
+			var validCands []string
+			var exp time.Time
 			if rerr != nil {
-				continue
-			}
-			for _, ip := range ips {
-				if config.AllowPrivateIP || !isPrivateIP(ip) {
-					cands = append(cands, ip)
+				exp = time.Now().Add(5 * time.Second)
+			} else {
+				for _, ip := range ips {
+					if isIPAllowed(ip) {
+						validCands = append(validCands, ip)
+					}
+				}
+				exp = time.Now().Add(config.DNSCacheExp)
+				if config.DNSCacheExp <= 0 {
+					exp = time.Now().Add(60 * time.Second)
 				}
 			}
+
+			allowedByHostMutex.Lock()
+			// Cache lại các IP đã phân giải của UDP để tránh mất gói tin đầu tiên (packet loss) khi test.
+			// Đưu má, logic của mình mà không nhớ, tự nhiên hỏi sao nó làm vậy ta, nhờ A.I dò hỏi lại thì nhớ ra. Tuổi già sức khỏe cmnr.
+			// Mới đầu tính để 1024 record rồi bụp xóa luôn, mà sợ nó sốc. Nên thôi xóa 'dồn lần' theo kiểu 'cuốn chiếu'
+/* 			if len(allowedByHost) >= 1024 {
+				allowedByHost = make(map[string]struct {
+					cands      []string
+					expireTime time.Time
+				})
+			} */
 			if len(allowedByHost) >= 1024 {
-				allowedByHost = make(map[string][]string)
+				// Nếu quá hạn thì xóa thoai
+				for k, v := range allowedByHost {
+					if now.After(v.expireTime) {
+						delete(allowedByHost, k)
+					}
+				}
+				// Trường hợp còn hạn mà bị đầy, tỉa tót, cuốn chiếu 256 tay
+				if len(allowedByHost) >= 1024 {
+					count := 0
+					for k := range allowedByHost {
+						delete(allowedByHost, k)
+						count++
+						if count >= 256 {
+							break
+						}
+					}
+				}
 			}
-			allowedByHost[targetHost] = cands
+			allowedByHost[targetHost] = struct {
+				cands      []string
+				expireTime time.Time
+			}{cands: validCands, expireTime: exp}
+			allowedByHostMutex.Unlock()
+
+			cands = validCands
 		}
+
 		if len(cands) == 0 {
 			continue
 		}
@@ -1370,7 +1434,7 @@ func handleSocks5UDP(c *peekReaderConn) {
 }
 
 // ---------------------------------------------------------------------------
-// Phân giải DNS Tốc độ cao kèm Singleflight (DNS Resolver with Singleflight)
+// Phân giải DNS Tốc độ cao kèm Singleflight
 // ---------------------------------------------------------------------------
 
 func normalizeDomain(d string) (string, error) {
@@ -1433,7 +1497,7 @@ func resolveDomainPriority(domain string) ([]string, error) {
 	return res, nil
 }
 
-var dnsCacheOrder = list.New() // Front = cũ nhất, Value = key (string)
+var dnsCacheOrder = list.New()
 
 func storeDNSCache(name string, ips []string) {
 	dnsCacheMutex.Lock()
@@ -1453,8 +1517,6 @@ func storeDNSCache(name string, ips []string) {
 		return
 	}
 
-	// Cuốn chiếu: bỏ từ đầu hàng đợi (cũ nhất, cũng là cái hết hạn trước) tới khi đủ chỗ
-	// Rolling: drop first lines (oldest) to clean up, keep space for newest records
 	for currentCacheSize+itemSize > config.DNSCacheSize {
 		front := dnsCacheOrder.Front()
 		if front == nil {
@@ -1528,7 +1590,7 @@ func runClientDNSHealthCheckWithInternal(domain string) {
 	check("Direct IP", config.DNSIP, queryUDP)
 	check("Fallback", config.DNSFallback, queryUDP)
 	if !dohOK && !dotOK {
-		fmt.Println("[WARNING] Neither DoH nor DoT works: DNS will fall back to unencrypted UDP and may be tampered with by your ISP.")
+		fmt.Println("[WARNING] Neither DoH nor DoT works: DNS will fall back to UDP port 53")
 	}
 }
 
@@ -1805,7 +1867,7 @@ func parseDNSResponse(data []byte, expectedID uint16) ([]string, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Tải Cấu hình (Configuration Loader)
+// Tải Cấu hình
 // ---------------------------------------------------------------------------
 
 func resolveConfigPath(name string) string {
@@ -1823,21 +1885,22 @@ func resolveConfigPath(name string) string {
 
 func loadConfig(filepath string) {
 	config = Config{
-		LogShow:         false,
-		ListenAddress:   ":3979", // Mặc định dual-stack / Default dual-stack
-		ReadTimeout:     10 * time.Second,
-		WriteTimeout:    10 * time.Second,
-		IdleTimeout:     60 * time.Second,
-		ClientTimeout:   60 * time.Second,
-		DNSFallback:     "208.67.222.222",
-		DNSIP:           "8.8.8.8",
-		DNSDOH:          "https://1.1.1.1/dns-query",
-		DNSDOT:          "1.1.1.1",
-		DNSCache:        true,
-		DNSCacheSize:    1024 * 1024,
-		DNSCacheExp:     60 * time.Second,
-		ClientAllowlist: "127.0.0.1; ::1",
-		AllowPrivateIP:  false,
+		LogShow:          false,
+		ListenAddress:    ":3979",
+		ReadTimeout:      10 * time.Second,
+		WriteTimeout:     10 * time.Second,
+		IdleTimeout:      60 * time.Second,
+		ClientTimeout:    60 * time.Second,
+		DNSFallback:      "208.67.222.222",
+		DNSIP:            "8.8.8.8",
+		DNSDOH:           "https://1.1.1.1/dns-query",
+		DNSDOT:           "1.1.1.1",
+		DNSCache:         true,
+		DNSCacheSize:     1024 * 1024,
+		DNSCacheExp:      60 * time.Second,
+		ClientAllowlist:  "127.0.0.1; ::1",
+		AllowPrivateIP:   false,
+		AllowPrivateDest: "",
 	}
 
 	file, err := os.Open(filepath)
@@ -1896,6 +1959,8 @@ func loadConfig(filepath string) {
 			config.ClientAllowlist = val
 		case "allowprivateip":
 			config.AllowPrivateIP = parseBool(val)
+		case "allowprivatedest":
+			config.AllowPrivateDest = val
 		default:
 			log.Printf("[CONFIG] line %d: unknown key %q ignored\n", lineNo, key)
 		}

@@ -1,0 +1,12 @@
+# 1.0.3
+### Chỉnh chọt (VI):
+Bổ sung phần `allowPrivateDest = 192.168.0.0/16;10.10.0.0/16`. Giải quyết việc không truy cập IP nội bộ được.
+Sửa lỗi treo cứng phân giải DNS khi xài SOCKS5 UDP
+Cho UDP cache IP đã phân giải tạm thời để tránh bị mất gói đầu, đồng thời xóa cache dạng cuốn chiếu khi đầy mà chưa hết giờ
+Tinh chỉnh lại vài thứ
+
+## Fixed (EN):
+Add `allowPrivateDest = 192.168.0.0/16;10.10.0.0/16` to fix the issue where internal IPs could not be accessed.
+Fix a hard lock/hang issue in DNS resolution when using SOCKS5 UDP.
+Implement temporary UDP caching for resolved IPs to prevent initial packet drops, along with a rolling eviction cache when it becomes full before expiration.
+Fine-tune a few things.
