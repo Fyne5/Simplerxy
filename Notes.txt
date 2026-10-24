@@ -5,4 +5,4 @@ Sửa vấn đề liên quan NXDOMAIN: khi domain không tồn tại thì bỏ q
 
 ## Fixed (EN):
 Boostrap DNS standard addition: Add the Bootstrap DNS standard. Bootstrap resolves DoH/DoT and caches the results for 5 minutes.
-NXDOMAIN issue fix: Fix the issue related to NXDOMAIN—when a domain does not exist, drop it immediately and do not forward it to other DNS servers to avoid wasting time.
+NXDOMAIN issue fix: Fix the issue related to NXDOMAIN - when a domain does not exist, drop it immediately and do not forward it to other DNS servers to avoid wasting time.
