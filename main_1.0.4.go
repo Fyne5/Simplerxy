@@ -17,6 +17,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,7 +30,7 @@ import (
 )
 
 const (
-	version = "1.0.3"
+	version = "1.0.4"
 
 	defaultDialTimeout                    = 5 * time.Second
 	defaultDNSTimeout                     = 5 * time.Second
@@ -44,6 +45,8 @@ const (
 	maxConcurrentConns   = 8192
 	maxHeaderBytes       = 64 * 1024
 )
+
+var errNXDomain = errors.New("NXDOMAIN: domain does not exist")
 
 var hopByHopHeaders = []string{
 	"Connection", "Keep-Alive", "Proxy-Authenticate",
@@ -120,6 +123,13 @@ var (
 	dnsCacheMutex    sync.RWMutex
 	currentCacheSize int64
 	dnsGroup         miniSingleflight
+
+	// Cache phân giải IP cho Bootstrap DoH/DoT nội bộ (Cache 5 phút)
+	bootstrapIPCacheStore = make(map[string]struct {
+		ip         string
+		expireTime time.Time
+	})
+	bootstrapIPCacheMutex sync.RWMutex
 
 	bufferPool = sync.Pool{
 		New: func() interface{} {
@@ -237,6 +247,94 @@ func main() {
 // Transport, Allowlist & Private IP
 // ---------------------------------
 
+// Hàm bootstrap phân giải tên miền DoH/DoT nội bộ độc lập, tránh vòng lặp, cache 5 phút
+func bootstrapResolve(input string) (string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", fmt.Errorf("empty input")
+	}
+
+	// Xử lý thông minh: nếu đầu vào là URL đầy đủ, bóc tách lấy Host
+	if strings.Contains(input, "://") {
+		if parsedURL, err := url.Parse(input); err == nil && parsedURL.Host != "" {
+			input = parsedURL.Host
+		}
+	}
+
+	if h, _, err := net.SplitHostPort(input); err == nil {
+		input = h
+	}
+	input = strings.Trim(input, "[]")
+
+	if ip := net.ParseIP(input); ip != nil {
+		return input, nil
+	}
+
+	normDomain, err := normalizeDomain(input)
+	if err != nil {
+		normDomain = input
+	}
+
+	now := time.Now()
+	bootstrapIPCacheMutex.RLock()
+	item, found := bootstrapIPCacheStore[normDomain]
+	bootstrapIPCacheMutex.RUnlock()
+	if found && now.Before(item.expireTime) {
+		return item.ip, nil
+	}
+
+	// Tạo gói tin DNS A query thô để bootstrap trực tiếp, hoàn toàn độc lập
+	queryBytes, expectedID := buildDNSQueryWithType(normDomain, 1)
+
+	servers := []string{config.DNSIP, config.DNSFallback}
+	var resolvedIP string
+
+	for _, srv := range servers {
+		if srv == "" {
+			continue
+		}
+		host, port := splitHostPortDefault(srv, "53")
+		conn, err := net.DialTimeout("udp", net.JoinHostPort(host, port), defaultDNSTimeout)
+		if err != nil {
+			continue
+		}
+		
+		conn.SetDeadline(time.Now().Add(defaultDNSTimeout))
+		if _, err := conn.Write(queryBytes); err != nil {
+			conn.Close()
+			continue
+		}
+
+		respBuf := make([]byte, 4096)
+		n, err := conn.Read(respBuf)
+		conn.Close()
+
+		if err != nil || n <= 0 {
+			continue
+		}
+
+		if ips, pErr := parseDNSResponse(respBuf[:n], expectedID); pErr == nil && len(ips) > 0 {
+			resolvedIP = ips[0]
+			break
+		}
+	}
+
+	if resolvedIP != "" {
+		bootstrapIPCacheMutex.Lock()
+		bootstrapIPCacheStore[normDomain] = struct {
+			ip         string
+			expireTime time.Time
+		}{
+			ip:         resolvedIP,
+			expireTime: now.Add(5 * time.Minute),
+		}
+		bootstrapIPCacheMutex.Unlock()
+		return resolvedIP, nil
+	}
+
+	return "", fmt.Errorf("bootstrap DNS resolution failed for %s", input)
+}
+
 func initHTTPTransport() {
 	httpTransport = &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -261,7 +359,20 @@ func initHTTPTransport() {
 	dohClient = &http.Client{
 		Timeout: defaultDoXTimeout,
 		Transport: &http.Transport{
-			Proxy:               nil,
+			Proxy: nil,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				host, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					host = addr
+					port = "443"
+				}
+				targetIP, bErr := bootstrapResolve(host)
+				if bErr != nil || targetIP == "" {
+					targetIP = host
+				}
+				dialer := net.Dialer{Timeout: defaultDialTimeout}
+				return dialer.DialContext(ctx, network, net.JoinHostPort(targetIP, port))
+			},
 			TLSHandshakeTimeout: defaultDoXTimeout,
 			MaxIdleConnsPerHost: 2,
 			IdleConnTimeout:     defaultTransportIdleConnTimeout,
@@ -1470,6 +1581,9 @@ func resolveDomainPriority(domain string) ([]string, error) {
 		item, found := dnsCacheStore[name]
 		dnsCacheMutex.RUnlock()
 		if found && time.Now().Before(item.ExpireTime) {
+			if len(item.IPs) == 0 {
+				return nil, errNXDomain
+			}
 			if config.LogShow {
 				log.Printf("[DNS CACHE HIT] Resolved %s -> [%s] from cache\n", name, strings.Join(item.IPs, " "))
 			}
@@ -1480,6 +1594,9 @@ func resolveDomainPriority(domain string) ([]string, error) {
 	res, err := dnsGroup.Do(name, func() ([]string, error) {
 		ips, rerr := resolveDomainActual(name)
 		if rerr != nil {
+			if errors.Is(rerr, errNXDomain) && useCache {
+				storeDNSCache(name, []string{})
+			}
 			return nil, rerr
 		}
 		if len(ips) == 0 {
@@ -1541,6 +1658,12 @@ func storeDNSCache(name string, ips []string) {
 	}
 }
 
+// Cách DNS hoạt động trong code :
+// 1. Bootstrap: xài tham số dnsIP > dnsFallback (UDP 53) để phân giải domain của DoH/DoT
+//    Ra IP thì cache nội bộ 5 phút (bootstrapIPCacheStore).
+//    Bootstrap độc lập, không đi qua resolveDomainPriority, tránh vòng lặp.
+//    Pha này hông có in ra log đâu
+// 2. Client: theo thứ tự ưu  DoH > DoT > dnsIP > dnsFallback
 func resolveDomainActual(domain string) ([]string, error) {
 	type step struct {
 		label, server string
@@ -1566,6 +1689,12 @@ func resolveDomainActual(domain string) ([]string, error) {
 				}
 			}
 			return ips, nil
+		}
+		if errors.Is(err, errNXDomain) {
+			if config.LogShow {
+				log.Printf("[DNS NXDOMAIN] Domain %s does not exist (verified by %s)\n", domain, s.label)
+			}
+			return nil, errNXDomain
 		}
 	}
 	return nil, fmt.Errorf("unable to resolve domain %s using all configured DNS servers", domain)
@@ -1611,6 +1740,12 @@ func queryDual(domain, label string, exec func([]byte, uint16) ([]string, error)
 		v4Res, errV4 = exec(qV4, idV4)
 	}()
 	wg.Wait()
+
+	if errors.Is(errV4, errNXDomain) || errors.Is(errV6, errNXDomain) {
+		if len(v4Res) == 0 && len(v6Res) == 0 {
+			return nil, errNXDomain
+		}
+	}
 
 	var final []string
 	if errV6 == nil {
@@ -1676,9 +1811,17 @@ func executeDoHRequest(dohURL string, query []byte, expectedID uint16) ([]string
 
 func executeDoTRequest(dotHost string, query []byte, expectedID uint16) ([]string, error) {
 	host, port := splitHostPortDefault(dotHost, "853")
+
+	// Bootstrap IP cho DoT Server
+	targetHostIP, bErr := bootstrapResolve(host)
+	if bErr != nil || targetHostIP == "" {
+		targetHostIP = host
+	}
+
+	// Giữ nguyên ServerName là hostname gốc để xác thực chứng chỉ TLS an toàn
 	tlsConfig := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
 
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: defaultDoXTimeout}, "tcp", net.JoinHostPort(host, port), tlsConfig)
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: defaultDoXTimeout}, "tcp", net.JoinHostPort(targetHostIP, port), tlsConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -1768,7 +1911,11 @@ func parseDNSResponse(data []byte, expectedID uint16) ([]string, error) {
 	if flags&0x8000 == 0 {
 		return nil, fmt.Errorf("not a DNS response")
 	}
-	if rcode := flags & 0x000F; rcode != 0 {
+
+	rcode := flags & 0x000F
+	if rcode == 3 {
+		return nil, errNXDomain
+	} else if rcode != 0 {
 		return nil, fmt.Errorf("DNS error rcode=%d", rcode)
 	}
 
@@ -1892,8 +2039,8 @@ func loadConfig(filepath string) {
 		IdleTimeout:      60 * time.Second,
 		ClientTimeout:    60 * time.Second,
 		DNSFallback:      "208.67.222.222",
-		DNSIP:            "8.8.8.8",
-		DNSDOH:           "https://1.1.1.1/dns-query",
+		DNSIP:            "9.9.9.9",
+		DNSDOH:           "https://dns.google/dns-query",
 		DNSDOT:           "1.1.1.1",
 		DNSCache:         true,
 		DNSCacheSize:     1024 * 1024,
