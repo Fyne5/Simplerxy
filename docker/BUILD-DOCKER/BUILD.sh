@@ -1,6 +1,6 @@
 #!/bin/bash
 
-BUILD_NUM="1.0.4"
+BUILD_NUM="1.0.5"
 
 cat << EOF > Dockerfile_simplerxy
 FROM alpine:3.22.0
@@ -10,18 +10,13 @@ RUN apk update && apk upgrade -a && \
     iptables \
     iproute2 \
     curl \
-    brotli-libs \
-    libstdc++ \
-    gcompat \
-    dos2unix \
     tzdata \
     dumb-init
 
 RUN mkdir -p /app/simplerxy
 WORKDIR /app/simplerxy
 
-COPY Simplerxy .
-RUN chmod +x Simplerxy
+COPY --chmod=755 Simplerxy .
 
 EXPOSE 3979
 

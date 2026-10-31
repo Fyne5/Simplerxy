@@ -1,8 +1,61 @@
-# 1.0.4
+# 1.0.5
 ### Chỉnh chọt (VI):
-Bổ sung tiêu chuẩn boostrap DNS. Boostrap thì phân giải DoH/DoT rồi cache lại 5 phút
-Sửa vấn đề liên quan NXDOMAIN: khi domain không tồn tại thì bỏ qua luôn, không truyền xuống các DNS khác để tránh mới thời gian.
+Lỗi idleTimeout: khi client đóng mà dest chưa đóng. Đã fix cho dest đóng theo
 
-## Fixed (EN):
-Boostrap DNS standard addition: Add the Bootstrap DNS standard. Bootstrap resolves DoH/DoT and caches the results for 5 minutes.
-NXDOMAIN issue fix: Fix the issue related to NXDOMAIN - when a domain does not exist, drop it immediately and do not forward it to other DNS servers to avoid wasting time.
+Hiện tại sợ tràn bộ nhớ đệm khi có nhu cầu socker UDP cao (QUIC, HTTP/3, video). Vậy gán trần là 4MB luôn khi LISTEN (lúc tạo thì 1MB thôi):
+`udpListener.SetReadBuffer`
+`udpListener.SetWriteBuffer`
+Giá trị 4MB này chỉ có hiệu lực khi gán trần bằng hoặc cao hơn 4MB trong hệ thống Linux. Còn Windows không sao.
+`sysctl -w net.core.rmem_max=4194304`
+`sysctl -w net.core.wmem_max=4194304`
+
+Khắc phục vòng lặp Simplerxy tự gọi chính nó, cũng như client vô tình (cố ý) có IP:PORT y chang Simplerxy.
+Client này gửi yêu cầu CONNECT tới proxy. Kết nối này tạo ra vòng lặp vô tận ăn hết các slot kết nối (`maxConcurrentConns`).
+
+Nếu config.conf gán `dnsLocalDomain = .coca; .local; .lan`, mỗi khi truy vấn các domain/host có đuôi đó, thì sẽ nhảy xuống bộ phân giải của hệ thống. Khi không có giá trị (rỗng), tính năng này sẽ bị loại bỏ, không đẩy thêm bất kỳ yêu cầu phân giải DNS nào xuống hệ thống (lẽ ra cấu hình thêm DNS IP nội bộ để thắt chặt phân giải, nhưng thiết nghĩ chưa cần thiết).
+
+Xét UDP client theo IP:PORT (trước đó chỉ IP), (RFC 1928)
+
+Giới hạn lại tối đa 5000 UDP socket. Mỗi UDP association max ga 256 socket (`maxUDPTargets`)
+
+Giới hạn 128 goroutine resolve DNS nền cho UDP chạy cùng lúc
+
+Nội bộ (Bootstrap): Cố định cache âm 30s cho mọi loại lỗi phân giải (timeout, connection refused, fail toàn tập...) để tránh spam UDP/DoX.
+
+Client: Cache âm theo thời gian cấu hình `DNSCacheExp` trong `config.conf` (60s). Đồng thời in chi tiết loại lỗi (ví dụ: NXDOMAIN, Timeout, Connection Error...) ra console log khi lưu cache.
+
+Khi client ngắt kết nối SOCKS5 đột ngột, ép hủy goroutine phân giải DNS nền. Không cần báo gì cho mệt mỏi
+
+DNS nào lỗi timeout, dial, network thì cho nghỉ 10 giây, sau đó mới query lại
+
+UDP ưu tiên IPv4 trước để chống rớt ngầm IPv6 (UDP không có handshake nên không biết v6 chết), v6 để phía sau làm sơ cua khi DialUDP/Write lỗi
+
+### Fixes (VI):
+Fixed an issue idleTimeout: where the destination did not close when the client closed. Now fixed so the destination closes accordingly.
+
+Currently, UDP buffer limit, there is a concern about buffer overflow under high UDP socket demands (QUIC, HTTP/3, video). Therefore, set a ceiling of 4MB when LISTEN (initially 1MB upon creation):
+  `udpListener.SetReadBuffer`
+  `udpListener.SetWriteBuffer`
+This 4MB value only takes effect if the system ceiling is set to 4MB or higher on Linux. Windows is unaffected
+  `sysctl -w net.core.rmem_max=4194304`
+  `sysctl -w net.core.wmem_max=4194304`
+
+Mitigated the infinite loop where Simplerxy calls itself, or when a client accidentally (or intentionally) has the exact same IP:PORT as Simplerxy. This client sent a CONNECT request to the proxy, creating an endless loop that exhausted all connection slots (`maxConcurrentConns`).
+
+If `dnsLocalDomain = .coca; .local; .lan` is assigned in `config.conf`, any queries for domains/hosts ending with those suffixes will fall back to the system resolver. When left empty, this feature is disabled, preventing any additional DNS resolution requests from being pushed to the system (originally considered configuring internal DNS IPs to tighten resolution, but deemed unnecessary for now).
+
+Track UDP clients by IP:PORT instead of IP alone (RFC 1928).
+
+Limited to a maximum of 5,000 UDP sockets. Each UDP association is capped at 256 sockets (`maxUDPTargets`).
+
+Limited background DNS resolution goroutines for UDP to 128 concurrent executions.
+
+Internal (Bootstrap): Fixed a 30-second negative cache for all types of resolution errors (timeout, connection refused, complete failure, etc.) to prevent UDP/DoX spam.
+
+Client: Negative caching based on the `DNSCacheExp` configuration time in `config.conf` (60s). At the same time, print detailed error types (e.g., NXDOMAIN, Timeout, Connection Error, etc.) to the console log when caching.
+
+When a SOCKS5 client suddenly disconnects, force-kill the background DNS resolution goroutine. No need to log redundant notifications.
+
+Any DNS encountering timeout, dial, or network errors is put on a 10-second cooldown before querying again.
+
+Prioritize IPv4 for UDP to prevent silent IPv6 drops (since UDP lacks a handshake, it cannot detect if v6 is dead); place v6 as a backup when `DialUDP/Write` fails.

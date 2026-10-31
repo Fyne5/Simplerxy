@@ -3,7 +3,7 @@
 
 services:
   simplerxy:
-    image: tquang/simplerxy:1.0.4
+    image: tquang/simplerxy:1.0.5
     container_name: simplerxy
     environment:
       TZ: "Asia/Saigon"

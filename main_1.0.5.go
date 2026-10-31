@@ -1,3 +1,7 @@
+// Làm tới đâu ghi chú tới đó, mốt hỏi lại ù ù cặc cặc, không nhớ gì ráo trọi.
+// Ghi chú xong rồi nhiều khi hỏi còn ú ớ chứ ở đó bày đặt xài trí não
+// Hão huyền, mộng tưởng, hoang đường...
+
 package main
 
 import (
@@ -29,9 +33,9 @@ import (
 	"time"
 )
 
-const (
-	version = "1.0.4"
+var version = "1.0.5"
 
+const (
 	defaultDialTimeout                    = 5 * time.Second
 	defaultDNSTimeout                     = 5 * time.Second
 	defaultDoXTimeout                     = 3 * time.Second
@@ -42,11 +46,14 @@ const (
 	udpTargetIdleTimeout = 30 * time.Second
 	udpWriteTimeout      = 10 * time.Second
 	maxUDPTargets        = 256
-	maxConcurrentConns   = 8192
+	maxConcurrentConns   = 4096
 	maxHeaderBytes       = 64 * 1024
 )
 
-var errNXDomain = errors.New("NXDOMAIN: domain does not exist")
+var (
+	errNXDomain   = errors.New("NXDOMAIN: domain does not exist")
+	errDNSAnswer  = errors.New("dns answer-level error")
+)
 
 var hopByHopHeaders = []string{
 	"Connection", "Keep-Alive", "Proxy-Authenticate",
@@ -71,12 +78,15 @@ type Config struct {
 	ClientAllowlist  string
 	AllowPrivateIP   bool
 	AllowPrivateDest string
+	// Lọc cấu hình local search domain dnsLocalDomain. Có khai báo sẽ xài DNS hệ thống, không có sẽ tắt để tránh leak
+	DNSLocalDomain   string
 }
 
 type DNSCacheItem struct {
 	IPs        []string
 	ExpireTime time.Time
 	Size       int64
+	Err        error
 	elem       *list.Element
 }
 
@@ -118,17 +128,31 @@ func (g *miniSingleflight) Do(key string, fn func() ([]string, error)) ([]string
 	return c.val, c.err
 }
 
+// Cache bootstrap nội bộ (ips == nil là cache âm)
+type bootstrapEntry struct {
+	ips        []string
+	expireTime time.Time
+}
+
+// Cache allowedByHost của UDP relay (cands đã lọc isIPAllowed)
+type allowedEntry struct {
+	cands      []string
+	expireTime time.Time
+}
+
 var (
 	dnsCacheStore    = make(map[string]DNSCacheItem)
 	dnsCacheMutex    sync.RWMutex
 	currentCacheSize int64
 	dnsGroup         miniSingleflight
+	dnsBadServers = make(map[string]time.Time)
+	dnsBadMutex   sync.Mutex
+	
+	// Dùng instance singleflight riêng biệt cho bootstrap để chống triệt để deadlock
+	bootstrapGroup   miniSingleflight
 
-	// Cache phân giải IP cho Bootstrap DoH/DoT nội bộ (Cache 5 phút)
-	bootstrapIPCacheStore = make(map[string]struct {
-		ip         string
-		expireTime time.Time
-	})
+	// Cache 5 phút phân giải IP cho Bootstrap DoH/DoT nội bộ lưu cả slice IP
+	bootstrapIPCacheStore = make(map[string]bootstrapEntry)
 	bootstrapIPCacheMutex sync.RWMutex
 
 	bufferPool = sync.Pool{
@@ -142,12 +166,17 @@ var (
 
 	httpTransport *http.Transport
 	dohClient     *http.Client
-
 	allowAll             bool
 	allowNets            []*net.IPNet
 	allowPrivateDestNets []*net.IPNet
-
 	errBlockedDestination = errors.New("destination not allowed")
+
+	// Giới hạn đỉnh nóc kịch trần 5000 UDP socket
+	// Mỗi UDP association có tối đa 256 socket (maxUDPTargets)
+	globalUDPTargetLimit = make(chan struct{}, 5000)
+
+	// Giới hạn 128 goroutine resolve DNS nền cho UDP chạy cùng lúc (toàn proxy)
+	udpResolveSem = make(chan struct{}, 128)
 
 	privateNets = func() []*net.IPNet {
 		cidrs := []string{
@@ -188,27 +217,39 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigCh
+		// Không thích graceful shutdown. Thích kiểu ngắt là xúc bỏ hết, miễn nói nhiều
 		os.Exit(0)
 	}()
 
 	log.Printf("Simplerxy %s (HTTP & SOCKS5 Dual-Stack TCP/UDP) is running at: %s\n", version, config.ListenAddress)
-	log.Printf("Log show status: %v\n", config.LogShow)
-	log.Printf("Timeouts -> Read(handshake): %v, Write: %v, Idle(tunnel): %v, Client(handshake): %v\n", config.ReadTimeout, config.WriteTimeout, config.IdleTimeout, config.ClientTimeout)
+	// log.Printf("Log show status: %v\n", config.LogShow)
+	//log.Printf("Timeouts -> Read(handshake): %v, Write: %v, Idle(tunnel): %v, Client(handshake): %v\n", config.ReadTimeout, config.WriteTimeout, config.IdleTimeout, config.ClientTimeout)
 	log.Printf("DNS Cache status: %v (Size limit: %d bytes, Expire: %v)\n", config.DNSCache, config.DNSCacheSize, config.DNSCacheExp)
+
+	// Lọc cấu hình local search domain dnsLocalDomain. Có khai báo sẽ xài DNS hệ thống, không có sẽ tắt để tránh leak
+	// Từng có ý định thắt chặt luôn IP của DNS nội bộ mà mình muốn, nhưng tiếc là khó quá, để đó đi.
+	if strings.TrimSpace(config.DNSLocalDomain) == "" {
+		log.Printf("DNS Local Domain status: disabled\n")
+	} else {
+		log.Printf("DNS Local Domain rules: [%s]\n", config.DNSLocalDomain)
+	}
+
 	log.Printf("Client Allowlist: [%s], Allow Private Dest: [%s], Allow Private IP: %v\n", config.ClientAllowlist, config.AllowPrivateDest, config.AllowPrivateIP)
 	if allowAll {
 		log.Printf("[WARNING] clientAllowlist is empty or '*': anyone who can reach %s can use this proxy\n", config.ListenAddress)
 	}
 
-	runClientDNSHealthCheckWithInternal("google.com")
+	go runClientDNSHealthCheckWithInternal("google.com")
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			// Listener đã đóng thì thoát vòng lặp
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			log.Printf("[ACCEPT ERROR] %v\n", err)
+			// Lỗi tạm thời (hết FD, EMFILE...): ghi log, nghỉ chút rồi thử lại
+			log.Printf("[ACCEPT] error: %v (retry in %v)\n", err, acceptErrorBackoff)
 			time.Sleep(acceptErrorBackoff)
 			continue
 		}
@@ -247,14 +288,34 @@ func main() {
 // Transport, Allowlist & Private IP
 // ---------------------------------
 
-// Hàm bootstrap phân giải tên miền DoH/DoT nội bộ độc lập, tránh vòng lặp, cache 5 phút
-func bootstrapResolve(input string) (string, error) {
+// Kiểm tra IP client có thể vô tình (cố ý) gửi yêu cầu CONNECT tới chính IP:PORT của proxy.
+// Kết nối này là RemoteAddr thuộc mạng nội bộ nên được chấp nhận, tạo loop vô tận cắn hết các slot kết nối (maxConcurrentConns)
+func isLocalAddr(ip net.IP) bool {
+	if ip.IsLoopback() {
+		return true
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		if ipNet, ok := addr.(*net.IPNet); ok {
+			if ipNet.IP.Equal(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Hàm bootstrap phân giải tên miền DoH/DoT nội bộ độc lập, trả về []string (Dual-Stack A & AAAA đã interleave), cache 5 phút
+func bootstrapResolve(input string) ([]string, error) {
 	input = strings.TrimSpace(input)
 	if input == "" {
-		return "", fmt.Errorf("empty input")
+		return nil, fmt.Errorf("empty input")
 	}
 
-	// Xử lý thông minh: nếu đầu vào là URL đầy đủ, bóc tách lấy Host
+	// Khi đầu vào là URL domain đầy đủ, bóc tách lấy Host
 	if strings.Contains(input, "://") {
 		if parsedURL, err := url.Parse(input); err == nil && parsedURL.Host != "" {
 			input = parsedURL.Host
@@ -267,7 +328,7 @@ func bootstrapResolve(input string) (string, error) {
 	input = strings.Trim(input, "[]")
 
 	if ip := net.ParseIP(input); ip != nil {
-		return input, nil
+		return []string{ip.String()}, nil
 	}
 
 	normDomain, err := normalizeDomain(input)
@@ -275,64 +336,245 @@ func bootstrapResolve(input string) (string, error) {
 		normDomain = input
 	}
 
+	// Lọc cấu hình local search domain dnsLocalDomain. Có khai báo sẽ xài DNS hệ thống, không có sẽ tắt để tránh leak
+	if matchesLocalDomain(normDomain) {
+		if config.LogShow {
+			log.Printf("[BOOTSTRAP SYSTEM] Domain %s matched local domain rules, resolving via system resolver\n", normDomain)
+		}
+		return resolveBySystem(normDomain)
+	}
+
 	now := time.Now()
 	bootstrapIPCacheMutex.RLock()
 	item, found := bootstrapIPCacheStore[normDomain]
 	bootstrapIPCacheMutex.RUnlock()
 	if found && now.Before(item.expireTime) {
-		return item.ip, nil
+		if len(item.ips) == 0 {
+			return nil, fmt.Errorf("bootstrap negative cache for %s", normDomain)
+		}
+		return item.ips, nil
 	}
 
-	// Tạo gói tin DNS A query thô để bootstrap trực tiếp, hoàn toàn độc lập
-	queryBytes, expectedID := buildDNSQueryWithType(normDomain, 1)
+	// Sử dụng bootstrapGroup riêng biệt để chống deadlock hoàn toàn
+	res, err := bootstrapGroup.Do(normDomain, func() ([]string, error) {
+		servers := []string{config.DNSIP, config.DNSFallback}
 
-	servers := []string{config.DNSIP, config.DNSFallback}
-	var resolvedIP string
-
-	for _, srv := range servers {
-		if srv == "" {
-			continue
+		// Truy vấn đồng thời cả bản ghi A (type 1) và AAAA (type 28)
+		queryTypes := []uint16{1, 28}
+		total := 0
+		for _, srv := range servers {
+			if srv != "" {
+				total += len(queryTypes)
+			}
 		}
-		host, port := splitHostPortDefault(srv, "53")
-		conn, err := net.DialTimeout("udp", net.JoinHostPort(host, port), defaultDNSTimeout)
-		if err != nil {
-			continue
-		}
-		
-		conn.SetDeadline(time.Now().Add(defaultDNSTimeout))
-		if _, err := conn.Write(queryBytes); err != nil {
-			conn.Close()
-			continue
+		if total == 0 {
+			return nil, fmt.Errorf("no bootstrap servers configured")
 		}
 
-		respBuf := make([]byte, 4096)
-		n, err := conn.Read(respBuf)
-		conn.Close()
+		resCh := make(chan []string, total)
 
-		if err != nil || n <= 0 {
-			continue
+		for _, srv := range servers {
+			if srv == "" {
+				continue
+			}
+			host, port := splitHostPortDefault(srv, "53")
+			serverAddr := net.JoinHostPort(host, port)
+
+			for _, qType := range queryTypes {
+				go func(addr string, qt uint16) {
+					queryBytes, expectedID := buildDNSQueryWithType(normDomain, qt)
+					conn, err := net.DialTimeout("udp", addr, defaultDNSTimeout)
+					if err != nil {
+						resCh <- nil
+						return
+					}
+					defer conn.Close()
+
+					conn.SetDeadline(time.Now().Add(defaultDNSTimeout))
+					if _, err := conn.Write(queryBytes); err != nil {
+						resCh <- nil
+						return
+					}
+
+					respBuf := make([]byte, 4096)
+					n, err := conn.Read(respBuf)
+					if err != nil || n <= 0 {
+						resCh <- nil
+						return
+					}
+
+					if ips, pErr := parseDNSResponse(respBuf[:n], expectedID); pErr == nil && len(ips) > 0 {
+						resCh <- ips
+					} else {
+						resCh <- nil
+					}
+				}(serverAddr, qType)
+			}
 		}
 
-		if ips, pErr := parseDNSResponse(respBuf[:n], expectedID); pErr == nil && len(ips) > 0 {
-			resolvedIP = ips[0]
-			break
+		var uniqueIPs []string
+		ipSet := make(map[string]bool)
+		addUnique := func(ips []string) {
+			for _, ip := range ips {
+				if !ipSet[ip] {
+					ipSet[ip] = true
+					uniqueIPs = append(uniqueIPs, ip)
+				}
+			}
 		}
-	}
 
-	if resolvedIP != "" {
+		var grace <-chan time.Time
+	collectLoop:
+		for i := 0; i < total; i++ {
+			select {
+			case ips := <-resCh:
+				if len(ips) > 0 {
+					addUnique(ips)
+					if grace == nil {
+						// Thuật toán Graceful Collection: Chờ kết quả đầu tiên, cho thêm 300ms gom các query còn lại
+						grace = time.After(300 * time.Millisecond)
+					}
+				}
+			case <-grace:
+				break collectLoop
+			}
+		}
+
+		if len(uniqueIPs) == 0 {
+			// Negative cache (cache âm) 30 giây cho mọi loại lỗi bootstrap nội bộ, giảm spam query liên tục
+			// Với bootstrap nội bộ thì không cần in nhiều quá, cùng lắm debug mới dò, ít log thôi
+			bootstrapIPCacheMutex.Lock()
+			bootstrapIPCacheStore[normDomain] = bootstrapEntry {
+				expireTime: time.Now().Add(30 * time.Second),
+			}
+			bootstrapIPCacheMutex.Unlock()
+			if config.LogShow {
+				log.Printf("[BOOTSTRAP NEGATIVE CACHE] Cached failure for %s (30s)\n", normDomain)
+			}
+			return nil, fmt.Errorf("Bootstrap DNS resolution failed for %s", normDomain)
+		}
+
+		// Kiểm tra đử IPv4/v6, tối ưu TTL cache
+		hasV4, hasV6 := false, false
+		for _, ip := range uniqueIPs {
+			if strings.Contains(ip, ":") {
+				hasV6 = true
+			} else {
+				hasV4 = true
+			}
+		}
+
+		cacheTTL := 5 * time.Minute
+		if !hasV4 || !hasV6 {
+			cacheTTL = 30 * time.Second // TTL ngắn 30s nếu thiếu 1 trong 2 IPv4/6
+		}
+
+		interleavedIPs := interleaveFamilies(uniqueIPs)
 		bootstrapIPCacheMutex.Lock()
-		bootstrapIPCacheStore[normDomain] = struct {
-			ip         string
-			expireTime time.Time
-		}{
-			ip:         resolvedIP,
-			expireTime: now.Add(5 * time.Minute),
+		bootstrapIPCacheStore[normDomain] = bootstrapEntry {
+			ips:        interleavedIPs,
+			expireTime: time.Now().Add(cacheTTL),
 		}
 		bootstrapIPCacheMutex.Unlock()
-		return resolvedIP, nil
+		return interleavedIPs, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if len(res) == 0 {
+		return nil, fmt.Errorf("bootstrap negative cache or empty result for %s", normDomain)
+	}
+	return res, nil
+}
+
+// Nhận context cha từ Dialer để tuân thủ timeout tuyệt đối
+func dialBootstrapWithFallback(parentCtx context.Context, ips []string, port string) (net.Conn, string, error) {
+	if len(ips) == 0 {
+		return nil, "", fmt.Errorf("no ips provided")
+	}
+	cands := interleaveFamilies(ips)
+
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	type result struct {
+		conn net.Conn
+		addr string
+		err  error
+	}
+	results := make(chan result, len(cands))
+	dialer := net.Dialer{Timeout: defaultDialTimeout}
+
+	start := func(ip string) {
+		addr := net.JoinHostPort(ip, port)
+		go func() {
+			c, err := dialer.DialContext(ctx, "tcp", addr)
+			results <- result{c, addr, err}
+		}()
 	}
 
-	return "", fmt.Errorf("bootstrap DNS resolution failed for %s", input)
+	timer := time.NewTimer(happyEyeballsDelay)
+	defer timer.Stop()
+	resetTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(happyEyeballsDelay)
+	}
+
+	next, pending := 1, 1
+	start(cands[0])
+
+	var lastErr error
+	for pending > 0 {
+		select {
+		case <-ctx.Done():
+			// Bổ sung goroutine drain để dọn dẹp các connection về trễ, chống rò FD
+			go func(n int) {
+				for i := 0; i < n; i++ {
+					if lr := <-results; lr.conn != nil {
+						lr.conn.Close()
+					}
+				}
+			}(pending)
+			return nil, "", ctx.Err()
+		case r := <-results:
+			pending--
+			if r.err == nil {
+				cancel()
+				go func(n int) {
+					for i := 0; i < n; i++ {
+						if lr := <-results; lr.conn != nil {
+							lr.conn.Close()
+						}
+					}
+				}(pending)
+				return r.conn, r.addr, nil
+			}
+			lastErr = r.err
+			if next < len(cands) {
+				start(cands[next])
+				next++
+				pending++
+				resetTimer()
+			}
+		case <-timer.C:
+			if next < len(cands) {
+				start(cands[next])
+				next++
+				pending++
+				timer.Reset(happyEyeballsDelay)
+			}
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no valid bootstrap destination IP address")
+	}
+	return nil, "", lastErr
 }
 
 func initHTTPTransport() {
@@ -344,10 +586,10 @@ func initHTTPTransport() {
 			}
 			ips, err := resolveDomainPriority(host)
 			if err != nil || len(ips) == 0 {
-				return nil, fmt.Errorf("could not resolve domain: %s", host)
+				return nil, fmt.Errorf("Could not resolve domain: %s", host)
 			}
 
-			conn, _, err := dialWithFallback(ips, port)
+			conn, _, err := dialWithFallback(ctx, ips, port)
 			return conn, err
 		},
 		DisableCompression:    true,
@@ -366,12 +608,12 @@ func initHTTPTransport() {
 					host = addr
 					port = "443"
 				}
-				targetIP, bErr := bootstrapResolve(host)
-				if bErr != nil || targetIP == "" {
-					targetIP = host
+				targetIPs, bErr := bootstrapResolve(host)
+				if bErr != nil || len(targetIPs) == 0 {
+					return nil, fmt.Errorf("DoH bootstrap failed for %s: %v", host, bErr) // Ngắt luôn, hông xài phân giải hệ thống
 				}
-				dialer := net.Dialer{Timeout: defaultDialTimeout}
-				return dialer.DialContext(ctx, network, net.JoinHostPort(targetIP, port))
+				conn, _, dErr := dialBootstrapWithFallback(ctx, targetIPs, port)
+				return conn, dErr
 			},
 			TLSHandshakeTimeout: defaultDoXTimeout,
 			MaxIdleConnsPerHost: 2,
@@ -434,7 +676,6 @@ func compileAllowPrivateDest() {
 		return
 	}
 	
-	// Nếu trong cấu hình rỗng thì in thông báo ra
 	if strings.TrimSpace(config.AllowPrivateDest) == "" {
 		log.Printf("[CONFIG] allowPrivateDest is empty: no private IP destinations are allowed\n")
 		return
@@ -542,6 +783,18 @@ func (c *timeoutConn) Close() error {
 
 func (c *timeoutConn) touch() {
 	c.lastActivity.Store(time.Now().UnixNano())
+}
+
+func (c *timeoutConn) closeCtx() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-c.closed:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 func (c *timeoutConn) Read(b []byte) (int, error) {
@@ -751,20 +1004,40 @@ func interleaveFamilies(ips []string) []string {
 	return out
 }
 
-func dialWithFallback(ips []string, port string) (net.Conn, string, error) {
+func dialWithFallback(parent context.Context, ips []string, port string) (net.Conn, string, error) {
+	// Kiểm tra IP client có thể vô tình (cố ý) gửi yêu cầu CONNECT tới chính IP:PORT của proxy.
+	// Kết nối này là RemoteAddr thuộc mạng nội bộ nên được chấp nhận, tạo loop vô tận cắn hết các slot kết nối (maxConcurrentConns)
+	// Port không khai trong config.conf thì tự gán 3979, ok?
+	_, listenPort, _ := net.SplitHostPort(config.ListenAddress)
+	if listenPort == "" {
+		listenPort = "3979"
+	}
+
 	cands := make([]string, 0, len(ips))
-	for _, ip := range ips {
-		if !isIPAllowed(ip) {
+	for _, ipStr := range ips {
+		if !isIPAllowed(ipStr) {
 			continue
 		}
-		cands = append(cands, ip)
+
+		// Kiểm tra IP client có thể vô tình (cố ý) gửi yêu cầu CONNECT tới chính IP:PORT của proxy.
+		// Kết nối này là RemoteAddr thuộc mạng nội bộ nên được chấp nhận, tạo loop vô tận cắn hết các slot kết nối (maxConcurrentConns)
+		// CHẶN VÒNG LẶP: Nếu client có IP:PORT giống proxy > bỏ qua
+		parsedIP := net.ParseIP(ipStr)
+		if port == listenPort && parsedIP != nil && isLocalAddr(parsedIP) {
+			if config.LogShow {
+				log.Printf("[SECURITY] Blocked self-referencing loop to local address: %s:%s\n", ipStr, port)
+			}
+			continue
+		}
+
+		cands = append(cands, ipStr)
 	}
 	if len(cands) == 0 {
 		return nil, "", errBlockedDestination
 	}
 	cands = interleaveFamilies(cands)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
 	type result struct {
@@ -801,6 +1074,15 @@ func dialWithFallback(ips []string, port string) (net.Conn, string, error) {
 	var lastErr error
 	for pending > 0 {
 		select {
+		case <-ctx.Done():
+			go func(n int) {
+				for i := 0; i < n; i++ {
+					if lr := <-results; lr.conn != nil {
+						lr.conn.Close()
+					}
+				}
+			}(pending)
+			return nil, "", ctx.Err()
 		case r := <-results:
 			pending--
 			if r.err == nil {
@@ -837,7 +1119,7 @@ func dialWithFallback(ips []string, port string) (net.Conn, string, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Cơ chế Tunnel & Xử lý Buffer Pool Pointer
+// Cơ chế Tunnel & Xử lý Buffer Pool Pointer (Bảo toàn 100% tính năng cắt ngẫu nhiên DPI/SNI)
 // ---------------------------------------------------------------------------
 
 func writeFirstChunk(dest net.Conn, data []byte) error {
@@ -884,6 +1166,17 @@ func tunnel(client *peekReaderConn, dest net.Conn) {
 		dest.Close()
 	}
 
+	// Đoạn goroutine này mục đích theo dõi idleTimeout, khi client đóng kết nối, thì dest cũng phải buộc đóng.
+	// Nếu không có goroutine này thì nhiều lúc client đóng, mà dest chưa đóng.
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-client.closed:
+			dest.Close()
+		case <-stop:
+		}
+	}()
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -908,6 +1201,7 @@ func tunnel(client *peekReaderConn, dest net.Conn) {
 	}()
 
 	wg.Wait()
+	close(stop)
 	killBoth()
 	bufferPool.Put(pUp)
 	bufferPool.Put(pDown)
@@ -981,7 +1275,9 @@ func handleConnectDirect(c *peekReaderConn, rawTarget string) {
 		return
 	}
 
-	destConn, connectedAddr, err := dialWithFallback(targetIPs, port)
+	ctx, cancel := c.closeCtx()
+	destConn, connectedAddr, err := dialWithFallback(ctx, targetIPs, port)
+	cancel()
 	if err != nil {
 		if errors.Is(err, errBlockedDestination) {
 			writeHTTPError(c, http.StatusForbidden)
@@ -997,7 +1293,7 @@ func handleConnectDirect(c *peekReaderConn, rawTarget string) {
 	}
 
 	if config.LogShow {
-		log.Printf("[HTTP CONNECT] Established connection to %s (%s)\n", rawTarget, connectedAddr)
+		log.Printf("[HTTP CONNECT] Established connection to %q (%s)\n", rawTarget, connectedAddr)
 	}
 
 	tunnel(c, destConn)
@@ -1074,7 +1370,9 @@ func handleWebSocketDirect(c *peekReaderConn, req *http.Request) {
 		return
 	}
 
-	destConn, connectedAddr, err := dialWithFallback(targetIPs, port)
+	ctx, cancel := c.closeCtx()
+	destConn, connectedAddr, err := dialWithFallback(ctx, targetIPs, port)
+	cancel()
 	if err != nil {
 		if errors.Is(err, errBlockedDestination) {
 			writeHTTPError(c, http.StatusForbidden)
@@ -1124,7 +1422,7 @@ func handleWebSocketDirect(c *peekReaderConn, req *http.Request) {
 	}
 
 	if config.LogShow {
-		log.Printf("[HTTP WEBSOCKET] Handshake response status %d from %s (%s)\n", resp.StatusCode, rawHost, connectedAddr)
+		log.Printf("[HTTP WEBSOCKET] Handshake response status %d from %q (%s)\n", resp.StatusCode, rawHost, connectedAddr)
 	}
 
 	if resp.StatusCode == http.StatusSwitchingProtocols {
@@ -1145,7 +1443,7 @@ func readSocks5Address(r io.Reader, atyp byte) (string, error) {
 	case 0x01:
 		b := make([]byte, 4)
 		if _, err := io.ReadFull(r, b); err != nil {
-			return "", err // Lỗi I/O / ngắt kết nối
+			return "", err
 		}
 		return net.IP(b).String(), nil
 	case 0x03:
@@ -1232,16 +1530,20 @@ func handleSocks5Direct(c *peekReaderConn) {
 	targetIPs, err := resolveDomainPriority(host)
 	if err != nil || len(targetIPs) == 0 {
 		if config.LogShow {
-			log.Printf("[SOCKS5 ERROR] DNS resolution failed for %s: %v\n", host, err)
+			// log.Printf("[SOCKS5 ERROR] DNS resolution failed for %s: %v\n", host, err)
+			log.Printf("[SOCKS5 ERROR] DNS resolution failed for %q: %v\n", host, err)
 		}
 		socks5Reply(c, 0x04)
 		return
 	}
 
-	destConn, targetAddr, err := dialWithFallback(targetIPs, portStr)
+	ctx, cancel := c.closeCtx()
+	destConn, targetAddr, err := dialWithFallback(ctx, targetIPs, portStr)
+	cancel()
 	if err != nil {
 		if config.LogShow {
-			log.Printf("[SOCKS5 ERROR] Connect to %s failed: %v\n", host, err)
+			// log.Printf("[SOCKS5 ERROR] Connect to %s failed: %v\n", host, err)
+			log.Printf("[SOCKS5 ERROR] Connect to %q failed: %v\n", host, err)
 		}
 		if errors.Is(err, errBlockedDestination) {
 			socks5Reply(c, 0x02)
@@ -1257,7 +1559,7 @@ func handleSocks5Direct(c *peekReaderConn) {
 	}
 
 	if config.LogShow {
-		log.Printf("[SOCKS5 CONNECT] Established TCP connection to %s (%s)\n", host, targetAddr)
+		log.Printf("[SOCKS5 CONNECT] Established TCP connection to %q (%s)\n", host, targetAddr)
 	}
 
 	tunnel(c, destConn)
@@ -1275,9 +1577,32 @@ func udpResponseHeader(addr *net.UDPAddr) []byte {
 	return append(h, byte(addr.Port>>8), byte(addr.Port))
 }
 
+// UDP ưu tiên IPv4 trước để chống rớt ngầm IPv6 (UDP không có handshake nên không biết v6 chết)
+// v6 để phía sau làm sơ cua khi DialUDP/Write lỗi
+func preferV4(ips []string) []string {
+	if len(ips) < 2 {
+		return ips
+	}
+	out := make([]string, 0, len(ips))
+	var v6 []string
+	for _, ip := range ips {
+		if strings.Contains(ip, ":") {
+			v6 = append(v6, ip)
+		} else {
+			out = append(out, ip)
+		}
+	}
+	return append(out, v6...)
+}
+
 func handleSocks5UDP(c *peekReaderConn) {
 	c.enterTunnel()
 	c.noIdle.Store(true)
+
+	// Khi client ngắt kết nối SOCKS5 đột ngột, ép hủy goroutine phân giải DNS nền
+	// Không cần báo gì cho mệt mỏi
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	clientHost, _, err := net.SplitHostPort(c.RemoteAddr().String())
 	if err != nil {
@@ -1302,6 +1627,12 @@ func handleSocks5UDP(c *peekReaderConn) {
 	}
 	defer udpListener.Close()
 
+	// Giá trị 4MB này chỉ có hiệu lực khi gán trần bằng hoặc cao hơn 4MB trong hệ thống
+	// sysctl -w net.core.rmem_max=4194304
+	// sysctl -w net.core.wmem_max=4194304
+	_ = udpListener.SetReadBuffer(4 << 20)
+	_ = udpListener.SetWriteBuffer(4 << 20)
+
 	localAddr := udpListener.LocalAddr().(*net.UDPAddr)
 	reply := []byte{0x05, 0x00, 0x00}
 	if ip4 := localTCP.IP.To4(); ip4 != nil {
@@ -1323,15 +1654,14 @@ func handleSocks5UDP(c *peekReaderConn) {
 	var (
 		udpConns           = make(map[string]*net.UDPConn)
 		udpConnsMutex      sync.Mutex
+		udpClosed          bool
 		clientUDPAddr      atomic.Pointer[net.UDPAddr]
 		allowedByHostMutex sync.Mutex
-		allowedByHost      = make(map[string]struct {
-			cands      []string
-			expireTime time.Time
-		})
+		allowedByHost      = make(map[string]allowedEntry)
 	)
 	defer func() {
 		udpConnsMutex.Lock()
+		udpClosed = true
 		for _, oc := range udpConns {
 			oc.Close()
 		}
@@ -1360,6 +1690,7 @@ func handleSocks5UDP(c *peekReaderConn) {
 					delete(udpConns, key)
 				}
 				udpConnsMutex.Unlock()
+				<-globalUDPTargetLimit
 			}()
 			p := bufferPool.Get().(*[]byte)
 			rb := *p
@@ -1386,6 +1717,97 @@ func handleSocks5UDP(c *peekReaderConn) {
 	buf := *pBuf
 	defer bufferPool.Put(pBuf)
 
+	var sendPayloadToTarget func(cands []string, pStr string, pLoad []byte)
+
+	sendPayloadToTarget = func(cands []string, pStr string, pLoad []byte) {
+		if len(cands) == 0 {
+			return
+		}
+		var outConn *net.UDPConn
+		var destKey string
+
+		udpConnsMutex.Lock()
+		if udpClosed {
+			udpConnsMutex.Unlock()
+			return
+		}
+		for _, ip := range cands {
+			key := net.JoinHostPort(ip, pStr)
+			if existing := udpConns[key]; existing != nil {
+				outConn, destKey = existing, key
+				break
+			}
+		}
+		if outConn == nil && len(udpConns) < maxUDPTargets {
+			// Giới hạn đỉnh nóc kịch trần 5000 UDP socket
+			// Mỗi UDP association có tối đa 256 socket (maxUDPTargets)
+			// Xài Fast fail / drop (Từ chối nhanh): hết chỗ là đá luôn cái mới muốn vào
+			// Không xài Eviction / LRU (Đuổi cũ nhường mới): đuổi cái cũ, chào cái mới
+			select {
+			case globalUDPTargetLimit <- struct{}{}:
+
+			default:
+				udpConnsMutex.Unlock()
+				if config.LogShow {
+					log.Printf("[UDP DROP] Global UDP target limit reached, dropping packet.\n")
+				}
+				return
+			}
+
+			for _, ip := range cands {
+				key := net.JoinHostPort(ip, pStr)
+				addr, aerr := net.ResolveUDPAddr("udp", key)
+				if aerr != nil {
+					continue
+				}
+				oc, derr := net.DialUDP("udp", nil, addr)
+				if derr != nil {
+					continue
+				}
+				// Cho 1MB khi socker UDP đang tiến hành mở (dial) kết nối
+				// Khi mở kế nối xong thì xét tới lắng nghe (listen) và gán 4 << 20
+				_ = oc.SetReadBuffer(1 << 20)
+				_ = oc.SetWriteBuffer(1 << 20)
+				outConn, destKey = oc, key
+				udpConns[key] = oc
+				startReader(oc, key)
+				break
+			}
+
+			if outConn == nil {
+				<-globalUDPTargetLimit
+			}
+		}
+		udpConnsMutex.Unlock()
+
+		if outConn == nil {
+			return
+		}
+
+		outConn.SetWriteDeadline(time.Now().Add(udpWriteTimeout))
+		if _, werr := outConn.Write(pLoad); werr != nil {
+			outConn.Close()
+			udpConnsMutex.Lock()
+			if udpConns[destKey] == outConn {
+				delete(udpConns, destKey)
+			}
+			udpConnsMutex.Unlock()
+
+			failedIP, _, _ := net.SplitHostPort(destKey)
+			var remainingCands []string
+			for _, ip := range cands {
+				if ip != failedIP {
+					remainingCands = append(remainingCands, ip)
+				}
+			}
+			if len(remainingCands) > 0 {
+				sendPayloadToTarget(remainingCands, pStr, pLoad)
+			}
+		} else {
+			outConn.SetReadDeadline(time.Now().Add(udpTargetIdleTimeout))
+		}
+	}
+
 	for {
 		n, remote, err := udpListener.ReadFromUDP(buf)
 		if err != nil {
@@ -1394,7 +1816,6 @@ func handleSocks5UDP(c *peekReaderConn) {
 		if !remote.IP.Equal(clientIP) {
 			continue
 		}
-		clientUDPAddr.CompareAndSwap(nil, remote)
 
 		if n < 10 || buf[2] != 0x00 {
 			continue
@@ -1427,6 +1848,15 @@ func handleSocks5UDP(c *peekReaderConn) {
 		if destPort == 0 {
 			continue
 		}
+
+		// Khoá client theo (IP, port) của gói hợp lệ đầu tiên (RFC 1928).
+		// Các gói sau khác port thì bỏ.
+		if locked := clientUDPAddr.Load(); locked == nil {
+			clientUDPAddr.Store(remote)
+		} else if locked.Port != remote.Port {
+			continue
+		}
+
 		payload := buf[headerLen:n]
 		portStr := strconv.Itoa(int(destPort))
 
@@ -1436,110 +1866,94 @@ func handleSocks5UDP(c *peekReaderConn) {
 		hasValidCache := cached && now.Before(entry.expireTime)
 		allowedByHostMutex.Unlock()
 
-		var cands []string
 		if hasValidCache {
-			cands = entry.cands
+			// Cache hit: Gửi ngay lập tức, không bị block
+			sendPayloadToTarget(entry.cands, portStr, payload)
 		} else {
-			ips, rerr := resolveDomainPriority(targetHost)
-			var validCands []string
-			var exp time.Time
-			if rerr != nil {
-				exp = time.Now().Add(5 * time.Second)
-			} else {
-				for _, ip := range ips {
-					if isIPAllowed(ip) {
-						validCands = append(validCands, ip)
-					}
+			// Giới hạn 128 goroutine resolve DNS nền cho UDP chạy cùng lúc (toàn proxy)
+			// Hết 128 slot resolve thì bỏ gói luôn, không tốn bộ nhớ copy payload
+			select {
+			case udpResolveSem <- struct{}{}:
+			default:
+				if config.LogShow {
+					log.Printf("[UDP DROP] Too many pending DNS resolves, dropping packet for %q\n", targetHost)
 				}
-				exp = time.Now().Add(config.DNSCacheExp)
-				if config.DNSCacheExp <= 0 {
-					exp = time.Now().Add(60 * time.Second)
-				}
+				continue
 			}
 
-			allowedByHostMutex.Lock()
-			// Cache lại các IP đã phân giải của UDP để tránh mất gói tin đầu tiên (packet loss) khi test.
-			// Đưu má, logic của mình mà không nhớ, tự nhiên hỏi sao nó làm vậy ta, nhờ A.I dò hỏi lại thì nhớ ra. Tuổi già sức khỏe cmnr.
-			// Mới đầu tính để 1024 record rồi bụp xóa luôn, mà sợ nó sốc. Nên thôi xóa 'dồn lần' theo kiểu 'cuốn chiếu'
-/* 			if len(allowedByHost) >= 1024 {
-				allowedByHost = make(map[string]struct {
-					cands      []string
-					expireTime time.Time
-				})
-			} */
-			if len(allowedByHost) >= 1024 {
-				// Nếu quá hạn thì xóa thoai
-				for k, v := range allowedByHost {
-					if now.After(v.expireTime) {
-						delete(allowedByHost, k)
+			payloadCopy := make([]byte, len(payload))
+			copy(payloadCopy, payload)
+
+			go func(tHost, pStr string, pLoad []byte) {
+				defer func() { <-udpResolveSem }()
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[RECOVER] Panic in UDP background DNS resolve worker: %v\n", r)
+					}
+				}()
+
+				// Khi client ngắt kết nối SOCKS5 đột ngột, ép hủy goroutine phân giải DNS nền
+				// Không cần báo gì cho mệt mỏi
+				// Kiểm tra trước xem client đã ngắt kết nối chưa
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				ips, rerr := resolveDomainPriority(tHost)
+				var validCands []string
+				var exp time.Time
+				if rerr != nil {
+					exp = time.Now().Add(5 * time.Second)
+				} else {
+					for _, ip := range ips {
+						if isIPAllowed(ip) {
+							validCands = append(validCands, ip)
+						}
+					}
+					exp = time.Now().Add(config.DNSCacheExp)
+					if config.DNSCacheExp <= 0 {
+						exp = time.Now().Add(60 * time.Second)
 					}
 				}
-				// Trường hợp còn hạn mà bị đầy, tỉa tót, cuốn chiếu 256 tay
+
+				// UDP ưu tiên IPv4 trước để chống rớt ngầm IPv6 (UDP không có handshake nên không biết v6 chết)
+				// v6 để phía sau làm sơ cua khi DialUDP/Write lỗi
+				validCands = preferV4(validCands)
+
+				allowedByHostMutex.Lock()
+				// Cache lại các IP đã phân giải của UDP để tránh mất gói tin đầu tiên (packet loss) khi test.
+				// Đưu má, logic của mình mà không nhớ, tự nhiên hỏi sao nó làm vậy ta, nhờ A.I dò hỏi lại thì nhớ ra. Tuổi già sức khỏe cmnr.
+				// Mới đầu tính để 1024 record rồi bụp xóa luôn, mà sợ nó sốc. Nên thôi xóa 'dồn lần' theo kiểu 'cuốn chiếu'
 				if len(allowedByHost) >= 1024 {
-					count := 0
-					for k := range allowedByHost {
-						delete(allowedByHost, k)
-						count++
-						if count >= 256 {
-							break
+					// Nếu quá hạn thì xóa thoai
+					for k, v := range allowedByHost {
+						if time.Now().After(v.expireTime) {
+							delete(allowedByHost, k)
+						}
+					}
+					// Trường hợp còn hạn mà bị đầy, tỉa tót, cuốn chiếu 256 tay
+					if len(allowedByHost) >= 1024 {
+						count := 0
+						for k := range allowedByHost {
+							delete(allowedByHost, k)
+							count++
+							if count >= 256 {
+								break
+							}
 						}
 					}
 				}
-			}
-			allowedByHost[targetHost] = struct {
-				cands      []string
-				expireTime time.Time
-			}{cands: validCands, expireTime: exp}
-			allowedByHostMutex.Unlock()
-
-			cands = validCands
-		}
-
-		if len(cands) == 0 {
-			continue
-		}
-
-		var outConn *net.UDPConn
-		var destKey string
-
-		udpConnsMutex.Lock()
-		for _, ip := range cands {
-			key := net.JoinHostPort(ip, portStr)
-			if existing := udpConns[key]; existing != nil {
-				outConn, destKey = existing, key
-				break
-			}
-		}
-		if outConn == nil && len(udpConns) < maxUDPTargets {
-			for _, ip := range cands {
-				key := net.JoinHostPort(ip, portStr)
-				addr, aerr := net.ResolveUDPAddr("udp", key)
-				if aerr != nil {
-					continue
+				allowedByHost[tHost] = allowedEntry {
+					cands: validCands,
+					expireTime: exp,
 				}
-				oc, derr := net.DialUDP("udp", nil, addr)
-				if derr != nil {
-					continue
-				}
-				outConn, destKey = oc, key
-				udpConns[key] = oc
-				startReader(oc, key)
-				break
-			}
-		}
-		udpConnsMutex.Unlock()
-		if outConn == nil {
-			continue
-		}
 
-		outConn.SetWriteDeadline(time.Now().Add(udpWriteTimeout))
-		if _, werr := outConn.Write(payload); werr != nil {
-			outConn.Close()
-			udpConnsMutex.Lock()
-			if udpConns[destKey] == outConn {
-				delete(udpConns, destKey)
-			}
-			udpConnsMutex.Unlock()
+				allowedByHostMutex.Unlock()
+
+				sendPayloadToTarget(validCands, pStr, pLoad)
+			}(targetHost, portStr, payloadCopy)
 		}
 	}
 }
@@ -1575,6 +1989,14 @@ func resolveDomainPriority(domain string) ([]string, error) {
 		return nil, err
 	}
 
+	// Lọc cấu hình local search domain dnsLocalDomain. Có khai báo sẽ xài DNS hệ thống, không có sẽ tắt để tránh leak
+	if matchesLocalDomain(name) {
+		if config.LogShow {
+			log.Printf("[DNS SYSTEM] Domain %s matched local domain rules, resolving via system resolver\n", name)
+		}
+		return resolveBySystem(name)
+	}
+
 	useCache := config.DNSCache && config.DNSCacheExp > 0 && config.DNSCacheSize > 0
 	if useCache {
 		dnsCacheMutex.RLock()
@@ -1582,6 +2004,12 @@ func resolveDomainPriority(domain string) ([]string, error) {
 		dnsCacheMutex.RUnlock()
 		if found && time.Now().Before(item.ExpireTime) {
 			if len(item.IPs) == 0 {
+				if config.LogShow {
+					log.Printf("[DNS NEGATIVE CACHE HIT] Domain %s is negative cached (Err: %v)\n", name, item.Err)
+				}
+				if item.Err != nil {
+					return nil, item.Err
+				}
 				return nil, errNXDomain
 			}
 			if config.LogShow {
@@ -1594,18 +2022,25 @@ func resolveDomainPriority(domain string) ([]string, error) {
 	res, err := dnsGroup.Do(name, func() ([]string, error) {
 		ips, rerr := resolveDomainActual(name)
 		if rerr != nil {
-			if errors.Is(rerr, errNXDomain) && useCache {
-				storeDNSCache(name, []string{})
+			if useCache {
+				// Cache âm (negative cache <- tiếng Anh nó dị đó) cho CLIENT theo config.conf (mặc định 60s) NXDOMAIN
+				// Các mã khác cho 10 giây thôi
+				storeDNSNegativeCache(name, rerr)
 			}
 			return nil, rerr
 		}
 		if len(ips) == 0 {
-			return nil, fmt.Errorf("no IP found for %s", name)
+			noIPErr := fmt.Errorf("no IP found for %s: %w", name, errNXDomain)
+			if useCache {
+				storeDNSNegativeCache(name, noIPErr)
+			}
+			return nil, noIPErr
 		}
+		interleavedIPs := interleaveFamilies(ips)
 		if useCache {
-			storeDNSCache(name, ips)
+			storeDNSCache(name, interleavedIPs)
 		}
-		return ips, nil
+		return interleavedIPs, nil
 	})
 
 	if err != nil {
@@ -1658,12 +2093,73 @@ func storeDNSCache(name string, ips []string) {
 	}
 }
 
+// Dành cho negative cache (cache âm)
+func storeDNSNegativeCache(name string, err error) {
+	dnsCacheMutex.Lock()
+	defer dnsCacheMutex.Unlock()
+
+	errType := "UNKNOWN_ERROR"
+	var netErr net.Error
+
+	if errors.Is(err, errNXDomain) {
+		errType = "NXDOMAIN"
+	} else if errors.As(err, &netErr) && netErr.Timeout() || strings.Contains(strings.ToLower(err.Error()), "timeout") {
+		errType = "TIMEOUT"
+	} else if strings.Contains(strings.ToLower(err.Error()), "refused") || strings.Contains(strings.ToLower(err.Error()), "reset") {
+		errType = "CONNECTION_REFUSED"
+	} else {
+		errType = err.Error()
+	}
+
+	if old, ok := dnsCacheStore[name]; ok {
+		currentCacheSize -= old.Size
+		dnsCacheOrder.Remove(old.elem)
+		delete(dnsCacheStore, name)
+	}
+
+	itemSize := int64(len(name) + 32)
+	if itemSize > config.DNSCacheSize {
+		return
+	}
+
+	for currentCacheSize+itemSize > config.DNSCacheSize {
+		front := dnsCacheOrder.Front()
+		if front == nil {
+			break
+		}
+		k := front.Value.(string)
+		currentCacheSize -= dnsCacheStore[k].Size
+		delete(dnsCacheStore, k)
+		dnsCacheOrder.Remove(front)
+	}
+
+	exp := config.DNSCacheExp
+	if exp <= 0 {
+		exp = 60 * time.Second
+	}
+	if errors.Is(err, errNXDomain) || errors.Is(err, errDNSAnswer) {
+	} else {
+		exp = 10 * time.Second
+	}
+
+	dnsCacheStore[name] = DNSCacheItem{
+		IPs:        []string{},
+		ExpireTime: time.Now().Add(exp),
+		Size:       itemSize,
+		Err:        err,
+		elem:       dnsCacheOrder.PushBack(name),
+	}
+	currentCacheSize += itemSize
+
+	if config.LogShow {
+		log.Printf("[DNS CLIENT NEGATIVE CACHE STORE] Cached negative result for %s | Reason: [%s] (Exp: %v)\n", name, errType, exp)
+	}
+}
+
 // Cách DNS hoạt động trong code :
-// 1. Bootstrap: xài tham số dnsIP > dnsFallback (UDP 53) để phân giải domain của DoH/DoT
-//    Ra IP thì cache nội bộ 5 phút (bootstrapIPCacheStore).
-//    Bootstrap độc lập, không đi qua resolveDomainPriority, tránh vòng lặp.
-//    Pha này hông có in ra log đâu
-// 2. Client: theo thứ tự ưu  DoH > DoT > dnsIP > dnsFallback
+// - Bootstrap: xài tham số dnsIP > dnsFallback (UDP 53) để phân giải domain của DoH/DoT. Ra IP thì cache nội bộ 5 phút (bootstrapIPCacheStore).
+// - Check 4 loại DNS coi còn sống không trước khi xài. Có in ra log rồi đó, tự coi đi.
+// - Client: theo thứ tự ưu  DoH > DoT > dnsIP > dnsFallback
 func resolveDomainActual(domain string) ([]string, error) {
 	type step struct {
 		label, server string
@@ -1676,10 +2172,29 @@ func resolveDomainActual(domain string) ([]string, error) {
 		{"Direct UDP", config.DNSIP, queryUDP, true},
 		{"Fallback UDP", config.DNSFallback, queryUDP, true},
 	}
+	var lastErr error
 	for _, s := range steps {
 		if s.server == "" {
 			continue
 		}
+
+		// DNS nào lỗi thì cho nghỉ 10 giây, sau đó mới query lại
+		// Check coi DNS có bị dính đen 10 giây hông
+		dnsBadMutex.Lock()
+		if exp, blocked := dnsBadServers[s.server]; blocked {
+			if time.Now().Before(exp) {
+				dnsBadMutex.Unlock()
+				if config.LogShow {
+					log.Printf("[DNS COOLDOWN] Skipping unhealthy DNS server %s (%s)\n", s.label, s.server)
+				}
+				continue
+			} else {
+				// Hết hạn thì xóa ra khỏi danh sách đen
+				delete(dnsBadServers, s.server)
+			}
+		}
+		dnsBadMutex.Unlock()
+
 		ips, err := s.fn(s.server, domain)
 		if err == nil && len(ips) > 0 {
 			if config.LogShow {
@@ -1690,6 +2205,19 @@ func resolveDomainActual(domain string) ([]string, error) {
 			}
 			return ips, nil
 		}
+		lastErr = err
+
+		// DNS nào lỗi thì cho nghỉ 10 giây, sau đó mới query lại
+		// Nếu lỗi KHÔNG PHẢI do NXDOMAIN/SERVFAIL. Chỉ khi timeout, dial, network
+		if !errors.Is(err, errNXDomain) && !errors.Is(err, errDNSAnswer) {
+			dnsBadMutex.Lock()
+			dnsBadServers[s.server] = time.Now().Add(10 * time.Second)
+			dnsBadMutex.Unlock()
+			if config.LogShow {
+				log.Printf("[DNS FAIL] Server %s (%s) failed: %v -> put on 10s cooldown\n", s.label, s.server, err)
+			}
+		}
+
 		if errors.Is(err, errNXDomain) {
 			if config.LogShow {
 				log.Printf("[DNS NXDOMAIN] Domain %s does not exist (verified by %s)\n", domain, s.label)
@@ -1697,7 +2225,10 @@ func resolveDomainActual(domain string) ([]string, error) {
 			return nil, errNXDomain
 		}
 	}
-	return nil, fmt.Errorf("unable to resolve domain %s using all configured DNS servers", domain)
+	if lastErr == nil {
+		return nil, fmt.Errorf("unable to resolve domain %s: all DNS servers are currently in temporary down", domain)
+	}
+	return nil, fmt.Errorf("unable to resolve domain %s using all configured DNS servers: %w", domain, lastErr)
 }
 
 func runClientDNSHealthCheckWithInternal(domain string) {
@@ -1719,7 +2250,7 @@ func runClientDNSHealthCheckWithInternal(domain string) {
 	check("Direct IP", config.DNSIP, queryUDP)
 	check("Fallback", config.DNSFallback, queryUDP)
 	if !dohOK && !dotOK {
-		fmt.Println("[WARNING] Neither DoH nor DoT works: DNS will fall back to UDP port 53")
+		fmt.Println("[WARNING] DoH/DoT desn't work: forward to UDP port 53")
 	}
 }
 
@@ -1757,7 +2288,14 @@ func queryDual(domain, label string, exec func([]byte, uint16) ([]string, error)
 	if len(final) > 0 {
 		return final, nil
 	}
-	return nil, fmt.Errorf("%s resolution failed for both IPv4 and IPv6", label)
+	switch {
+	case errV4 != nil && errV6 != nil:
+		return nil, fmt.Errorf("%s resolution failed (A: %w; AAAA: %w)", label, errV4, errV6)
+	case errV4 != nil:
+		return nil, fmt.Errorf("%s resolution failed (A: %w)", label, errV4)
+	default:
+		return nil, fmt.Errorf("%s resolution failed (AAAA: %w)", label, errV6)
+	}
 }
 
 func queryDoH(dohURL, domain string) ([]string, error) {
@@ -1812,31 +2350,41 @@ func executeDoHRequest(dohURL string, query []byte, expectedID uint16) ([]string
 func executeDoTRequest(dotHost string, query []byte, expectedID uint16) ([]string, error) {
 	host, port := splitHostPortDefault(dotHost, "853")
 
-	// Bootstrap IP cho DoT Server
-	targetHostIP, bErr := bootstrapResolve(host)
-	if bErr != nil || targetHostIP == "" {
-		targetHostIP = host
+	// Bootstrap IP cho DoT Server hỗ trợ Dual-Stack và Happy Eyeballs
+	targetIPs, bErr := bootstrapResolve(host)
+	if bErr != nil || len(targetIPs) == 0 {
+		return nil, fmt.Errorf("DoT bootstrap failed for %s: %v", host, bErr)
 	}
 
-	// Giữ nguyên ServerName là hostname gốc để xác thực chứng chỉ TLS an toàn
-	tlsConfig := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+	// Giới hạn timeout 3s cho DoT dial
+	ctx, cancel := context.WithTimeout(context.Background(), defaultDoXTimeout)
+	defer cancel()
 
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: defaultDoXTimeout}, "tcp", net.JoinHostPort(targetHostIP, port), tlsConfig)
+	conn, _, err := dialBootstrapWithFallback(ctx, targetIPs, port)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
+
+	// Đặt Deadline ngay trước Handshake để phòng thủ tuyệt đối trường hợp server DPI/blackhole ngâm socket
 	conn.SetDeadline(time.Now().Add(defaultDoXTimeout))
+
+	tlsConfig := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+	tlsConn := tls.Client(conn, tlsConfig)
+	if err := tlsConn.Handshake(); err != nil {
+		return nil, err
+	}
+	defer tlsConn.Close()
 
 	msg := make([]byte, 2, 2+len(query))
 	binary.BigEndian.PutUint16(msg, uint16(len(query)))
 	msg = append(msg, query...)
-	if _, err := conn.Write(msg); err != nil {
+	if _, err := tlsConn.Write(msg); err != nil {
 		return nil, err
 	}
 
 	lenBuf := make([]byte, 2)
-	if _, err := io.ReadFull(conn, lenBuf); err != nil {
+	if _, err := io.ReadFull(tlsConn, lenBuf); err != nil {
 		return nil, err
 	}
 	respLen := binary.BigEndian.Uint16(lenBuf)
@@ -1844,7 +2392,7 @@ func executeDoTRequest(dotHost string, query []byte, expectedID uint16) ([]strin
 		return nil, fmt.Errorf("empty DoT response")
 	}
 	respBuf := make([]byte, respLen)
-	if _, err := io.ReadFull(conn, respBuf); err != nil {
+	if _, err := io.ReadFull(tlsConn, respBuf); err != nil {
 		return nil, err
 	}
 	return parseDNSResponse(respBuf, expectedID)
@@ -1916,12 +2464,12 @@ func parseDNSResponse(data []byte, expectedID uint16) ([]string, error) {
 	if rcode == 3 {
 		return nil, errNXDomain
 	} else if rcode != 0 {
-		return nil, fmt.Errorf("DNS error rcode=%d", rcode)
+		return nil, fmt.Errorf("%w: rcode=%d", errDNSAnswer, rcode)
 	}
 
 	ancount := binary.BigEndian.Uint16(data[6:8])
 	if ancount == 0 {
-		return nil, fmt.Errorf("no answers found in DNS response")
+		return nil, fmt.Errorf("%w: no answers found in DNS response", errDNSAnswer)
 	}
 
 	offset := 12
@@ -2010,7 +2558,7 @@ func parseDNSResponse(data []byte, expectedID uint16) ([]string, error) {
 		return resultIPs, nil
 	}
 
-	return nil, fmt.Errorf("no usable IP address found")
+	return nil, fmt.Errorf("%w: no usable IP address found", errDNSAnswer)
 }
 
 // ---------------------------------------------------------------------------
@@ -2030,7 +2578,7 @@ func resolveConfigPath(name string) string {
 	return name
 }
 
-func loadConfig(filepath string) {
+func loadConfig(pathCfg string) {
 	config = Config{
 		LogShow:          false,
 		ListenAddress:    ":3979",
@@ -2039,9 +2587,9 @@ func loadConfig(filepath string) {
 		IdleTimeout:      60 * time.Second,
 		ClientTimeout:    60 * time.Second,
 		DNSFallback:      "208.67.222.222",
-		DNSIP:            "9.9.9.9",
-		DNSDOH:           "https://dns.google/dns-query",
-		DNSDOT:           "1.1.1.1",
+		DNSIP:            "8.8.4.4",
+		DNSDOH:           "https://1.1.1.1/dns-query",
+		DNSDOT:           "dns.quad9.net",
 		DNSCache:         true,
 		DNSCacheSize:     1024 * 1024,
 		DNSCacheExp:      60 * time.Second,
@@ -2050,9 +2598,9 @@ func loadConfig(filepath string) {
 		AllowPrivateDest: "",
 	}
 
-	file, err := os.Open(filepath)
+	file, err := os.Open(pathCfg)
 	if err != nil {
-		fmt.Printf("The config file %s is missing, use default hard code.\n", filepath)
+		fmt.Printf("The config file %s is missing, use default hard code.\n", pathCfg)
 		return
 	}
 	defer file.Close()
@@ -2108,6 +2656,9 @@ func loadConfig(filepath string) {
 			config.AllowPrivateIP = parseBool(val)
 		case "allowprivatedest":
 			config.AllowPrivateDest = val
+		// Lọc cấu hình local search domain dnsLocalDomain. Có khai báo sẽ xài DNS hệ thống, không có sẽ tắt để tránh leak
+		case "dnslocaldomain":
+			config.DNSLocalDomain = val
 		default:
 			log.Printf("[CONFIG] line %d: unknown key %q ignored\n", lineNo, key)
 		}
@@ -2162,4 +2713,50 @@ func parseDuration(key, val string, current time.Duration) time.Duration {
 	}
 	log.Printf("[CONFIG] invalid duration for %s: %q (keeping %v)\n", key, val, current)
 	return current
+}
+
+// Lọc cấu hình local search domain dnsLocalDomain. Có khai báo sẽ xài DNS hệ thống, không có sẽ tắt để tránh leak
+func matchesLocalDomain(domain string) bool {
+	if strings.TrimSpace(config.DNSLocalDomain) == "" {
+		return false
+	}
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+
+	rules := strings.ReplaceAll(config.DNSLocalDomain, ",", ";")
+	for _, rule := range strings.Split(rules, ";") {
+		rule = strings.ToLower(strings.TrimSpace(rule))
+		if rule == "" {
+			continue
+		}
+		if strings.HasPrefix(rule, ".") {
+			if strings.HasSuffix(domain, rule) || domain == strings.TrimPrefix(rule, ".") {
+				return true
+			}
+		} else {
+			if domain == rule || strings.HasSuffix(domain, "."+rule) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Lọc cấu hình local search domain dnsLocalDomain. Có khai báo sẽ xài DNS hệ thống, không có sẽ tắt để tránh leak
+func resolveBySystem(domain string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultDNSTimeout)
+	defer cancel()
+
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
+
+	var ips []string
+	for _, addr := range addrs {
+		ips = append(ips, addr.IP.String())
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no system IP found for %s", domain)
+	}
+	return interleaveFamilies(ips), nil
 }

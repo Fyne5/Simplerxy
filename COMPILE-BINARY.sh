@@ -1,6 +1,6 @@
 #!/bin/bash
 
-FILE="main_1.0.4.go"
+FILE="main_1.0.5.go"
 
 if [ "$1" == "run" ]; then
     echo "Running debug with race detector..."
@@ -10,7 +10,7 @@ fi
 
 rm -f Simplerxy-*
 
-BUILD_FLAGS="-trimpath -ldflags=-s -ldflags=-w"
+BUILD_FLAGS=(-trimpath "-ldflags=-s -w")
 
 PLATFORMS=(
   "darwin/amd64/Simplerxy-macos-amd64"
@@ -28,7 +28,7 @@ for entry in "${PLATFORMS[@]}"; do
   IFS="/" read -r os arch output <<< "$entry"
   (
     echo " -> Building $output ($os/$arch)..."
-    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build $BUILD_FLAGS -o "$output" "$FILE"
+    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build "${BUILD_FLAGS[@]}" -o "$output" "$FILE"
   ) &
 done
 
