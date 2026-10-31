@@ -30,7 +30,7 @@ DNS nào lỗi timeout, dial, network thì cho nghỉ 10 giây, sau đó mới q
 
 UDP ưu tiên IPv4 trước để chống rớt ngầm IPv6 (UDP không có handshake nên không biết v6 chết), v6 để phía sau làm sơ cua khi DialUDP/Write lỗi
 
-### Fixes (VI):
+### Fixes (EN):
 Fixed an issue idleTimeout: where the destination did not close when the client closed. Now fixed so the destination closes accordingly.
 
 Currently, UDP buffer limit, there is a concern about buffer overflow under high UDP socket demands (QUIC, HTTP/3, video). Therefore, set a ceiling of 4MB when LISTEN (initially 1MB upon creation):
