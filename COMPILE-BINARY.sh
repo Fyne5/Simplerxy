@@ -11,6 +11,18 @@ fi
 rm -f Simplerxy-*
 
 BUILD_FLAGS=(-trimpath "-ldflags=-s -w")
+# Khi build kết hợp 2 tham số này, thì sẽ chỉ còn thấy "-trimpath=true", đó là bình thường.
+# Còn "-ldflags=-s -w" sẽ không hiện trực tiếp, khi so dung lượng binary xuất ra mới thấy nhỏ hơn.
+# go version -m Simplerxy-linux-amd64
+# Simplerxy-linux-amd64: go1.24.4
+#         path    command-line-arguments
+#         build   -buildmode=exe
+#         build   -compiler=gc
+#         build   -trimpath=true
+#         build   CGO_ENABLED=0
+#         build   GOARCH=amd64
+#         build   GOOS=linux
+#         build   GOAMD64=v1
 
 PLATFORMS=(
   "darwin/amd64/Simplerxy-macos-amd64"
