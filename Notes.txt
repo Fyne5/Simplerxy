@@ -1,12 +1,12 @@
 # 1.0.6
 ### Chỉnh chọt (VI):
-Cơ chế nội bộ của Simplerxy là xài `dnsIP`\`dnsFallback` phân giải IP của domain DoH/DoT (vd: https://dns.google/dns-query)
+Cơ chế nội bộ của Simplerxy là xài `dnsIP` \ `dnsFallback` phân giải IP của domain DoH/DoT (vd: https://dns.google/dns-query)
 Khi phân giải được IP của domain DoH/DoT thì ghi nhớ rồi gửi tới pha xài cho client
 Client theo thứ tự ưu tiên đầu DoH > DoT > dnsIP > dnsFallback. Từ đây mới nảy ra ý đồ bổ sung `dnsForceIP`.
 
 Tham số `dnsForceIP` - cưỡng ép IP cho dmain, chạy nền trong (internal). Tính năng nội tại bị động chỉ chạy khi:
 - Không phân giải được IP của domain DoH/DoT (do phía ngoài chặn domain này)
-- Bị nhà mạng gán IP pha ke loopback như 127.0.0.1 / 0.0.0.0 / ::1 / ::
+- Bị nhà mạng gán IP pha ke loopback như `127.0.0.1` \ `0.0.0.0` \ `::1` \ `::`
 - Nhà mạng ép thành IP khác cũng không lo, vì sai chứng chỉ, dẫn tới thất bại rồi
 `dnsForceIP = dns.google[8.8.8.8|8.8.4.4]; cloudflare-dns.com[104.16.249.249|104.16.248.249]`
 
@@ -15,16 +15,16 @@ Có dòng `dnsForceIP`: ghi đè hoàn toàn, không trộn với mặc định.
 Để trống `dnsForceIP`: tắt tính năng.
 
 Tạm điều chỉnh vì lỗi bảo mật kernel MPTCP khi xài linux: CVE-2026-98432
-`
+Làm cho có tụ xôm xôm thôi, chứ ổn nhứt là update kernel đi.
+```
 //go:debug multipathtcp=0
 package main
-`
-
-`
+```
+```
 	lc := net.ListenConfig{}
 	lc.SetMultipathTCP(false)
 	listener, err := lc.Listen(context.Background(), "tcp", config.ListenAddress)
-`
+```
 
 Chỉ tác động với kernel linux, chưa ghi nhận MacOS/Windows
 ```
@@ -42,13 +42,13 @@ Simplerxy-linux-amd64: go1.27.3
 ```
 
 ### Fixed (EN):
-Simplerxy's internal mechanism uses `dnsIP`/`dnsFallback` to resolve the IP of DoH/DoT domains (e.g., https://dns.google/dns-query)
+Simplerxy's internal mechanism uses `dnsIP` \ `dnsFallback` to resolve the IP of DoH/DoT domains (e.g., https://dns.google/dns-query)
 Once the IP of the DoH/DoT domain is resolved, it is cached and then sent to be used for the client.
 The client follows this priority order: DoH > DoT > dnsIP > dnsFallback. From this, the idea to add `dnsForceIP` was born.
 
 The `dnsForceIP` parameter - force IP for a domain, running internally in the background. This passive internal feature only runs when:
 - The IP of the DoH/DoT domain cannot be resolved (due to external domain blocking).
-- The ISP assigns fake loopback IPs like 127.0.0.1 / 0.0.0.0 / ::1 / ::.
+- The ISP assigns fake loopback IPs like `127.0.0.1` \ `0.0.0.0` \ `::1` \ `::`
 - Even if the ISP forces a different IP, there's no need to worry, because of certificate mismatch, which leads to a failure anyway
 `dnsForceIP = dns.google[8.8.8.8|8.8.4.4]; cloudflare-dns.com[104.16.249.249|104.16.248.249]`
 
@@ -57,20 +57,19 @@ With the `dnsForceIP` line: completely overrides, does not mix with defaults. An
 Leave `dnsForceIP` empty: disables the feature.
 
 Temporary adjustment due to the Linux kernel MPTCP security vulnerability: CVE-2026-98432
-
-`
+Just doing this for good measure, but updating the kernel is still the best way to go.
+```
 //go:debug multipathtcp=0
 package main
-`
-`
+```
+```
 	lc := net.ListenConfig{}
 	lc.SetMultipathTCP(false)
 	listener, err := lc.Listen(context.Background(), "tcp", config.ListenAddress)
-`
+```
 
 Only affects the Linux kernel; no incidents recorded on macOS/Windows yet.
-
-`
+```
 go version -m Simplerxy-linux-amd64
 Simplerxy-linux-amd64: go1.27.3
 	path	command-line-arguments
@@ -82,4 +81,4 @@ Simplerxy-linux-amd64: go1.27.3
 	build	GOARCH=amd64
 	build	GOOS=linux
 	build	GOAMD64=v1
-`
+```
