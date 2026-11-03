@@ -1,61 +1,85 @@
-# 1.0.5
+# 1.0.6
 ### Chỉnh chọt (VI):
-Lỗi idleTimeout: khi client đóng mà dest chưa đóng. Đã fix cho dest đóng theo
+Cơ chế nội bộ của Simplerxy là xài `dnsIP`\`dnsFallback` phân giải IP của domain DoH/DoT (vd: https://dns.google/dns-query)
+Khi phân giải được IP của domain DoH/DoT thì ghi nhớ rồi gửi tới pha xài cho client
+Client theo thứ tự ưu tiên đầu DoH > DoT > dnsIP > dnsFallback. Từ đây mới nảy ra ý đồ bổ sung `dnsForceIP`.
 
-Hiện tại sợ tràn bộ nhớ đệm khi có nhu cầu socker UDP cao (QUIC, HTTP/3, video). Vậy gán trần là 4MB luôn khi LISTEN (lúc tạo thì 1MB thôi):
-`udpListener.SetReadBuffer`
-`udpListener.SetWriteBuffer`
-Giá trị 4MB này chỉ có hiệu lực khi gán trần bằng hoặc cao hơn 4MB trong hệ thống Linux. Còn Windows không sao.
-`sysctl -w net.core.rmem_max=4194304`
-`sysctl -w net.core.wmem_max=4194304`
+Tham số `dnsForceIP` - cưỡng ép IP cho dmain, chạy nền trong (internal). Tính năng nội tại bị động chỉ chạy khi:
+- Không phân giải được IP của domain DoH/DoT (do phía ngoài chặn domain này)
+- Bị nhà mạng gán IP pha ke loopback như 127.0.0.1 / 0.0.0.0 / ::1 / ::
+- Nhà mạng ép thành IP khác cũng không lo, vì sai chứng chỉ, dẫn tới thất bại rồi
+`dnsForceIP = dns.google[8.8.8.8|8.8.4.4]; cloudflare-dns.com[104.16.249.249|104.16.248.249]`
 
-Khắc phục vòng lặp Simplerxy tự gọi chính nó, cũng như client vô tình (cố ý) có IP:PORT y chang Simplerxy.
-Client này gửi yêu cầu CONNECT tới proxy. Kết nối này tạo ra vòng lặp vô tận ăn hết các slot kết nối (`maxConcurrentConns`).
+Không có tập tin `config.conf`, không có dòng `dnsForceIP`, hoặc khai báo tá lả âm binh sai bét: dùng mặc định hard-code
+Có dòng `dnsForceIP`: ghi đè hoàn toàn, không trộn với mặc định. Thiếu domain nào thì domain đó không có IP dự phòng.
+Để trống `dnsForceIP`: tắt tính năng.
 
-Nếu config.conf gán `dnsLocalDomain = .coca; .local; .lan`, mỗi khi truy vấn các domain/host có đuôi đó, thì sẽ nhảy xuống bộ phân giải của hệ thống. Khi không có giá trị (rỗng), tính năng này sẽ bị loại bỏ, không đẩy thêm bất kỳ yêu cầu phân giải DNS nào xuống hệ thống (lẽ ra cấu hình thêm DNS IP nội bộ để thắt chặt phân giải, nhưng thiết nghĩ chưa cần thiết).
+Tạm điều chỉnh vì lỗi bảo mật kernel MPTCP khi xài linux: CVE-2026-98432
+`
+//go:debug multipathtcp=0
+package main
+`
 
-Xét UDP client theo IP:PORT (trước đó chỉ IP), (RFC 1928)
+`
+	lc := net.ListenConfig{}
+	lc.SetMultipathTCP(false)
+	listener, err := lc.Listen(context.Background(), "tcp", config.ListenAddress)
+`
 
-Giới hạn lại tối đa 5000 UDP socket. Mỗi UDP association max ga 256 socket (`maxUDPTargets`)
+Chỉ tác động với kernel linux, chưa ghi nhận MacOS/Windows
+```
+go version -m Simplerxy-linux-amd64
+Simplerxy-linux-amd64: go1.27.3
+	path	command-line-arguments
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	-trimpath=true
+	build	DefaultGODEBUG=multipathtcp=0
+	build	CGO_ENABLED=0
+	build	GOARCH=amd64
+	build	GOOS=linux
+	build	GOAMD64=v1
+```
 
-Giới hạn 128 goroutine resolve DNS nền cho UDP chạy cùng lúc
+### Fixed (EN):
+Simplerxy's internal mechanism uses `dnsIP`/`dnsFallback` to resolve the IP of DoH/DoT domains (e.g., https://dns.google/dns-query)
+Once the IP of the DoH/DoT domain is resolved, it is cached and then sent to be used for the client.
+The client follows this priority order: DoH > DoT > dnsIP > dnsFallback. From this, the idea to add `dnsForceIP` was born.
 
-Nội bộ (Bootstrap): Cố định cache âm 30s cho mọi loại lỗi phân giải (timeout, connection refused, fail toàn tập...) để tránh spam UDP/DoX.
+The `dnsForceIP` parameter - force IP for a domain, running internally in the background. This passive internal feature only runs when:
+- The IP of the DoH/DoT domain cannot be resolved (due to external domain blocking).
+- The ISP assigns fake loopback IPs like 127.0.0.1 / 0.0.0.0 / ::1 / ::.
+- Even if the ISP forces a different IP, there's no need to worry, because of certificate mismatch, which leads to a failure anyway
+`dnsForceIP = dns.google[8.8.8.8|8.8.4.4]; cloudflare-dns.com[104.16.249.249|104.16.248.249]`
 
-Client: Cache âm theo thời gian cấu hình `DNSCacheExp` trong `config.conf` (60s). Đồng thời in chi tiết loại lỗi (ví dụ: NXDOMAIN, Timeout, Connection Error...) ra console log khi lưu cache.
+No `config.conf` file, no `dnsForceIP` line, or messy/incorrect configuration: defaults to hard-coded values.
+With the `dnsForceIP` line: completely overrides, does not mix with defaults. Any missing domain will not have a fallback IP.
+Leave `dnsForceIP` empty: disables the feature.
 
-Khi client ngắt kết nối SOCKS5 đột ngột, ép hủy goroutine phân giải DNS nền. Không cần báo gì cho mệt mỏi
+Temporary adjustment due to the Linux kernel MPTCP security vulnerability: CVE-2026-98432
 
-DNS nào lỗi timeout, dial, network thì cho nghỉ 10 giây, sau đó mới query lại
+`
+//go:debug multipathtcp=0
+package main
+`
+`
+	lc := net.ListenConfig{}
+	lc.SetMultipathTCP(false)
+	listener, err := lc.Listen(context.Background(), "tcp", config.ListenAddress)
+`
 
-UDP ưu tiên IPv4 trước để chống rớt ngầm IPv6 (UDP không có handshake nên không biết v6 chết), v6 để phía sau làm sơ cua khi DialUDP/Write lỗi
+Only affects the Linux kernel; no incidents recorded on macOS/Windows yet.
 
-### Fixes (EN):
-Fixed an issue idleTimeout: where the destination did not close when the client closed. Now fixed so the destination closes accordingly.
-
-Currently, UDP buffer limit, there is a concern about buffer overflow under high UDP socket demands (QUIC, HTTP/3, video). Therefore, set a ceiling of 4MB when LISTEN (initially 1MB upon creation):
-  `udpListener.SetReadBuffer`
-  `udpListener.SetWriteBuffer`
-This 4MB value only takes effect if the system ceiling is set to 4MB or higher on Linux. Windows is unaffected
-  `sysctl -w net.core.rmem_max=4194304`
-  `sysctl -w net.core.wmem_max=4194304`
-
-Mitigated the infinite loop where Simplerxy calls itself, or when a client accidentally (or intentionally) has the exact same IP:PORT as Simplerxy. This client sent a CONNECT request to the proxy, creating an endless loop that exhausted all connection slots (`maxConcurrentConns`).
-
-If `dnsLocalDomain = .coca; .local; .lan` is assigned in `config.conf`, any queries for domains/hosts ending with those suffixes will fall back to the system resolver. When left empty, this feature is disabled, preventing any additional DNS resolution requests from being pushed to the system (originally considered configuring internal DNS IPs to tighten resolution, but deemed unnecessary for now).
-
-Track UDP clients by IP:PORT instead of IP alone (RFC 1928).
-
-Limited to a maximum of 5,000 UDP sockets. Each UDP association is capped at 256 sockets (`maxUDPTargets`).
-
-Limited background DNS resolution goroutines for UDP to 128 concurrent executions.
-
-Internal (Bootstrap): Fixed a 30-second negative cache for all types of resolution errors (timeout, connection refused, complete failure, etc.) to prevent UDP/DoX spam.
-
-Client: Negative caching based on the `DNSCacheExp` configuration time in `config.conf` (60s). At the same time, print detailed error types (e.g., NXDOMAIN, Timeout, Connection Error, etc.) to the console log when caching.
-
-When a SOCKS5 client suddenly disconnects, force-kill the background DNS resolution goroutine. No need to log redundant notifications.
-
-Any DNS encountering timeout, dial, or network errors is put on a 10-second cooldown before querying again.
-
-Prioritize IPv4 for UDP to prevent silent IPv6 drops (since UDP lacks a handshake, it cannot detect if v6 is dead); place v6 as a backup when `DialUDP/Write` fails.
+`
+go version -m Simplerxy-linux-amd64
+Simplerxy-linux-amd64: go1.27.3
+	path	command-line-arguments
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	-trimpath=true
+	build	DefaultGODEBUG=multipathtcp=0
+	build	CGO_ENABLED=0
+	build	GOARCH=amd64
+	build	GOOS=linux
+	build	GOAMD64=v1
+`

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-BUILD_NUM="1.0.5"
+BUILD_NUM="1.0.6"
 
 cat << EOF > Dockerfile_simplerxy
 FROM alpine:3.22.0
