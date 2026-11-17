@@ -40,13 +40,13 @@ import (
 // Hằng số & Cấu hình toàn cục
 // ---------------------------------------------------------------------------
 
-var version = "1.0.6"
+var version = "1.0.7v2"
 
 const (
 	defaultDialTimeout                    = 5 * time.Second
 	defaultDNSTimeout                     = 5 * time.Second
 	defaultDoXTimeout                     = 4 * time.Second
-	forceIPHeadStart                      = 400 * time.Millisecond // Chờ IP bootstrap bao lâu thì chạy song song IP dnsForceIP
+	forceIPHeadStart                      = 400 * time.Millisecond // Thời gian IP bootstrap chờ trước khi chạy song song IP dnsForceIP
 	defaultTransportResponseHeaderTimeout = 30 * time.Second
 	defaultTransportIdleConnTimeout       = 90 * time.Second
 	happyEyeballsDelay   = 250 * time.Millisecond
@@ -99,6 +99,7 @@ type Config struct {
 	AllowPrivateIP   bool
 	AllowPrivateDest string
 	DNSLocalDomain   string
+	DNSLocalResolver string
 	DNSForceIP       string
 }
 
@@ -149,6 +150,7 @@ func (g *miniSingleflight) Do(key string, fn func() ([]string, error)) ([]string
 }
 
 // Cache bootstrap nội bộ (ips == nil là negative cache)
+// Negative cache nôm na là ba cái domain không tồn tại, lỗi này nọ (tra google thêm đi)
 type bootstrapEntry struct {
 	ips        []string
 	expireTime time.Time
@@ -185,6 +187,7 @@ var (
 	bootstrapGroup miniSingleflight
 
 	// Cache 5 phút phân giải IP cho Bootstrap DoH/DoT nội bộ lưu cả slice IP
+	// Tìm code: cacheTTL := 5 * time.Minute
 	bootstrapIPCacheStore = make(map[string]bootstrapEntry)
 	bootstrapIPCacheMutex sync.RWMutex
 
@@ -256,7 +259,9 @@ func main() {
 	configPath := flag.String("config", "config.conf", "path to config file")
 	flag.Parse()
 
-	loadConfig(resolveConfigPath(*configPath))
+	cfgPath := resolveConfigPath(*configPath)
+	loadConfig(cfgPath)
+
 	compileAllowlist()
 	compileAllowPrivateDest()
 	initHTTPTransport()
@@ -280,23 +285,30 @@ func main() {
 		os.Exit(0)
 	}()
 
-	log.Printf("Simplerxy %s (HTTP & SOCKS5 Dual-Stack TCP/UDP) is running at: %s\n", version, config.ListenAddress)
+	log.Printf("Simplerxy %s: https://github.com/Fyne5/Simplerxy\n", version)
+	log.Printf("HTTP & SOCKS5 Dual-Stack TCP/UDP is running at: %s\n", config.ListenAddress)
 	// Mấy cái log hiển thị khi chạy console đó mà
 	// log.Printf("Log show status: %v\n", config.LogShow)
 	// log.Printf("Timeouts -> Read(handshake): %v, Write: %v, Idle(tunnel): %v, Client(handshake): %v\n", config.ReadTimeout, config.WriteTimeout, config.IdleTimeout, config.ClientTimeout)
 	log.Printf("DNS Cache status: %v (Size limit: %d bytes, Expire: %v)\n", config.DNSCache, config.DNSCacheSize, config.DNSCacheExp)
 
-	// Lọc cấu hình local search domain dnsLocalDomain. Có khai báo sẽ xài DNS hệ thống, không có sẽ tắt để tránh leak
-	// Đáng lẽ là phải thắt chặt IP nào được phân giải cho cái đám trong dnsLocalDomain, mà chưa biết làm, kệ nó cứ dị đi
+	// Các local domain được khai báo trong dnsLocalDomain, sẽ được phân giải bởi IP DNS trong dnsLocalResolver.
+	// Khi không có dòng dnsLocalResolver, hoặc không có IP DNS, sẽ đưa xuống resolver hệ thống. Không cache.
+	// Các domain ngoài dnsLocalDomain vẫn theo quy tắc 4 cấp DoH > DoT > dnsIP > dnsFallback. Không được xuống resolver hệ thống.
 	if strings.TrimSpace(config.DNSLocalDomain) == "" {
 		log.Printf("DNS Local Domain status: disabled\n")
 	} else {
 		log.Printf("DNS Local Domain rules: [%s]\n", config.DNSLocalDomain)
+		if len(dnsLocalResolvers) > 0 {
+			log.Printf("DNS Local Resolver (strict, no system fallback): %v\n", dnsLocalResolvers)
+		} else {
+			log.Printf("DNS Local Resolver: not set -> local domains resolved by system resolver\n")
+		}
 	}
 
 	log.Printf("Client Allowlist: [%s], Allow Private Dest: [%s], Allow Private IP: %v\n", config.ClientAllowlist, config.AllowPrivateDest, config.AllowPrivateIP)
 	if allowAll {
-		log.Printf("[WARNING] clientAllowlist is empty or '*': anyone who can reach %s can use this proxy\n", config.ListenAddress)
+		log.Printf("[WARNING]: clientAllowlist is empty or '*', now allow all\n", config.ListenAddress)
 	}
 
 	go runClientDNSHealthCheckWithInternal("google.com")
@@ -309,14 +321,14 @@ func main() {
 				return
 			}
 			// Lỗi tạm thời (hết FD, EMFILE...): ghi log, nghỉ chút rồi thử lại
-			log.Printf("[ACCEPT] error: %v (retry in %v)\n", err, acceptErrorBackoff)
+			log.Printf("[ACCEPT]: error %v (retry in %v)\n", err, acceptErrorBackoff)
 			time.Sleep(acceptErrorBackoff)
 			continue
 		}
 
 		if !isClientAllowed(conn.RemoteAddr()) {
 			if config.LogShow {
-				log.Printf("[SECURITY] Rejected connection from unauthorized IP: %s\n", conn.RemoteAddr())
+				log.Printf("[SECURITY]: Rejected client IP not in allow list %s\n", conn.RemoteAddr())
 			}
 			conn.Close()
 			continue
@@ -326,7 +338,7 @@ func main() {
 		case maxConnsChan <- struct{}{}:
 		default:
 			if config.LogShow {
-				log.Printf("[LIMIT] Too many concurrent connections, dropping %s\n", conn.RemoteAddr())
+				log.Printf("[LIMIT]: Too many concurrent connections, dropping %s\n", conn.RemoteAddr())
 			}
 			conn.Close()
 			continue
@@ -335,7 +347,7 @@ func main() {
 		go func(c net.Conn) {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[RECOVER] Panic recovered in connection handler: %v\n", r)
+					log.Printf("[RECOVER]: Panic recovered in connection handler %v\n", r)
 				}
 				<-maxConnsChan
 			}()
@@ -396,11 +408,12 @@ func bootstrapResolve(input string) ([]string, error) {
 		normDomain = input
 	}
 
-	// Lọc cấu hình local search domain dnsLocalDomain. Có khai báo sẽ xài DNS hệ thống, không có sẽ tắt để tránh leak
-		// Đáng lẽ là phải thắt chặt IP nào được phân giải cho cái đám trong dnsLocalDomain, mà chưa biết làm, kệ nó cứ dị đi
+	// Các local domain được khai báo trong dnsLocalDomain, sẽ được phân giải bởi IP DNS trong dnsLocalResolver.
+	// Khi không có dòng dnsLocalResolver, hoặc không có IP DNS, sẽ đưa xuống resolver hệ thống. Không cache.
+	// Các domain ngoài dnsLocalDomain vẫn theo quy tắc 4 cấp DoH > DoT > dnsIP > dnsFallback. Không được xuống resolver hệ thống.
 	if matchesLocalDomain(normDomain) {
 		if config.LogShow {
-			log.Printf("[BOOTSTRAP SYSTEM] Domain %s matched local domain rules, resolving via system resolver\n", normDomain)
+			log.Printf("[BOOTSTRAP LOCAL]: Domain %s matched local domain rules, resolving via local resolver\n", normDomain)
 		}
 		return resolveBySystem(normDomain)
 	}
@@ -436,7 +449,7 @@ func bootstrapResolve(input string) ([]string, error) {
 			}
 			bootstrapIPCacheMutex.Unlock()
 			if config.LogShow {
-				log.Printf("[BOOTSTRAP FORCE-IP] %s for %s, using dnsForceIP %v (30s)\n", reason, normDomain, forced)
+				log.Printf("[BOOTSTRAP FORCE-IP]: %s for %s, using dnsForceIP %v (30s)\n", reason, normDomain, forced)
 			}
 			return forced, true
 		}
@@ -554,7 +567,7 @@ func bootstrapResolve(input string) ([]string, error) {
 			}
 			bootstrapIPCacheMutex.Unlock()
 			if config.LogShow {
-				log.Printf("[BOOTSTRAP NEGATIVE CACHE] Cached failure for %s (30s)\n", normDomain)
+				log.Printf("[BOOTSTRAP NEGATIVE CACHE]: Cached failure for %s (30s)\n", normDomain)
 			}
 			return nil, fmt.Errorf("Bootstrap DNS resolution failed for %s", normDomain)
 		}
@@ -692,12 +705,11 @@ func pinBootstrapIPs(normDomain string, ips []string, ttl time.Duration) {
 	bootstrapIPCacheMutex.Unlock()
 }
 
-// Phần dưới này coi xem IP của các domain DoH/DoT có bị nhà mạng (ISP) ép sai hay không, có kiểm tra qua handshake TCP + TLS
+// Phần dưới này coi IP của các domain DoH/DoT có bị nhà mạng (ISP) pha ke không, kiểm tra handshake TCP + TLS
 // Chạy kiểm tra song song với đám IP có sẵn trong dnsForceIP:
-//   - IP bootstrap thất bại sớm (RST, sai chứng chỉ do nhà mạng ép IP...) -> chạy IP khai sẵn ngay.
-//   - IP bootstrap chưa xong sau forceIPHeadStart (nhà mạng ngâm kết nối) -> chạy IP khai sẵn song song.
-// Bên nào bắt tay TLS xong trước thì thắng, bên còn lại bị hủy. Chứng chỉ vẫn kiểm theo tên miền (cfg.ServerName)
-// nên IP khai sai hoặc bị tráo không giả mạo được server, tệ nhất là thất bại.
+//   - IP bootstrap bị RST (reset đó), sai chứng chỉ do ISP pha ke IP... > xài liền IP khai sẵn.
+//   - IP bootstrap chưa xong sau forceIPHeadStart (nhà mạng ngâm kết nối) > chạy IP khai sẵn song song.
+// Bên nào bắt tay TLS xong trước thì thắng (xài nó), bên còn lại bị hủy. Chứng chỉ vẫn kiểm theo tên miền (cfg.ServerName)
 // Không rớt xuống phân giải hệ thống. IP khai sẵn thắng thì ghim 30s để các lần sau đi thẳng.
 func dialTLSBootstrap(ctx context.Context, host, port string, cfg *tls.Config) (*tls.Conn, error) {
 	normHost, _ := normalizeDomain(host) // lỗi thì rỗng, tức là không có IP khai sẵn
@@ -762,7 +774,7 @@ func dialTLSBootstrap(ctx context.Context, host, port string, cfg *tls.Config) (
 		}
 		forcedStarted = true
 		if config.LogShow {
-			log.Printf("[BOOTSTRAP FORCE-IP] %s for %s, trying dnsForceIP %v\n", reason, host, rest)
+			log.Printf("[BOOTSTRAP FORCE-IP]: %s for %s, trying dnsForceIP %v\n", reason, host, rest)
 		}
 		start(rest, true)
 	}
@@ -884,7 +896,7 @@ func parseIPNets(listStr string) []*net.IPNet {
 		if strings.Contains(rule, "/") {
 			_, n, err := net.ParseCIDR(rule)
 			if err != nil {
-				log.Printf("[CONFIG] invalid CIDR: %q\n", rule)
+				log.Printf("[CONFIG]: invalid CIDR %q\n", rule)
 				continue
 			}
 			nets = append(nets, n)
@@ -896,7 +908,7 @@ func parseIPNets(listStr string) []*net.IPNet {
 			}
 			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
 		} else {
-			log.Printf("[CONFIG] invalid IP: %q\n", rule)
+			log.Printf("[CONFIG]: invalid IP %q\n", rule)
 		}
 	}
 	return nets
@@ -912,7 +924,7 @@ func compileAllowlist() {
 	allowAll = false
 	allowNets = parseIPNets(config.ClientAllowlist)
 	if len(allowNets) == 0 {
-		log.Printf("[WARNING] clientAllowlist has no valid entries: every client will be rejected\n")
+		log.Printf("[WARNING]: clientAllowlist has no valid entries: every client will be rejected\n")
 	}
 }
 
@@ -923,13 +935,13 @@ func compileAllowPrivateDest() {
 	}
 	
 	if strings.TrimSpace(config.AllowPrivateDest) == "" {
-		log.Printf("[CONFIG] allowPrivateDest is empty: no private IP destinations are allowed\n")
+		log.Printf("[CONFIG]: allowPrivateDest is empty: no private IP destinations are allowed\n")
 		return
 	}
 
 	allowPrivateDestNets = parseIPNets(config.AllowPrivateDest)
 	if len(allowPrivateDestNets) == 0 {
-		log.Printf("[WARNING] allowPrivateDest has no valid CIDRs/IPs configured\n")
+		log.Printf("[WARNING]: allowPrivateDest has no valid CIDRs/IPs configured\n")
 	}
 }
 
@@ -1271,7 +1283,7 @@ func dialWithFallback(parent context.Context, ips []string, port string) (net.Co
 		parsedIP := net.ParseIP(ipStr)
 		if port == listenPort && parsedIP != nil && isLocalAddr(parsedIP) {
 			if config.LogShow {
-				log.Printf("[SECURITY] Blocked self-referencing loop to local address: %s:%s\n", ipStr, port)
+				log.Printf("[SECURITY]: Blocked self-referencing loop to local address %s:%s\n", ipStr, port)
 			}
 			continue
 		}
@@ -1368,27 +1380,230 @@ func dialWithFallback(parent context.Context, ips []string, port string) (net.Co
 // Cơ chế Tunnel & Xử lý Buffer Pool Pointer (Bảo toàn 100% tính năng cắt ngẫu nhiên DPI/SNI)
 // ---------------------------------------------------------------------------
 
-func writeFirstChunk(dest net.Conn, data []byte) error {
-	if len(data) > 5 && data[0] == 0x16 {
-		splitPos := 2 + rand.Intn(4)
-		if _, err := dest.Write(data[:splitPos]); err != nil {
+const (
+	fixThreshold   = 2                // số lần nghi lỗi để đưa domain sang TCP split
+	fixWindow      = 5 * time.Minute  // các lần lỗi phải nằm trong khoảng này
+	fixMaxEntries  = 100              // số domain tối đa trong danh sách TCP split (cuốn chiếu) và số domain đang theo dõi
+	fragFailMaxAge = 10 * time.Second // chỉ coi là lỗi nếu xảy ra trong khoảng này kể từ lúc mở tunnel
+)
+
+type fixHit struct {
+	n     int       // số lần nghi lỗi trong cửa sổ hiện tại
+	first time.Time // lần lỗi đầu của cửa sổ hiện tại
+}
+
+// Bảo vệ fixDomains, fixOrder và fixHits
+var fixMu sync.RWMutex
+
+// Domain đã học được (khớp đúng từng chữ), chỉ nằm trong RAM, mất khi restart.
+// fixOrder giữ thứ tự thêm vào: cũ nhất ở đầu
+var (
+	fixDomains = map[string]struct{}{}
+	fixOrder   []string
+)
+
+// Bộ đếm lỗi tạm, chưa đủ ngưỡng để chuyển sang TCP split
+var fixHits = map[string]fixHit{}
+
+func isFixDomain(host string) bool {
+	fixMu.RLock()
+	_, ok := fixDomains[host]
+	fixMu.RUnlock()
+	return ok
+}
+
+func noteFragFailure(host string) {
+	now := time.Now()
+
+	fixMu.Lock()
+	if _, ok := fixDomains[host]; ok {
+		fixMu.Unlock()
+		return
+	}
+	if len(fixHits) >= fixMaxEntries {
+		fixHits = map[string]fixHit{}
+	}
+	h := fixHits[host]
+	if h.n == 0 || now.Sub(h.first) > fixWindow {
+		h = fixHit{first: now} // mở cửa sổ mới
+	}
+	h.n++
+	if h.n < fixThreshold {
+		fixHits[host] = h
+		fixMu.Unlock()
+		return
+	}
+	delete(fixHits, host)
+
+	// Đầy thì cuốn chiếu: bỏ mục cũ nhất
+	evicted := ""
+	if len(fixOrder) >= fixMaxEntries {
+		evicted = fixOrder[0]
+		fixOrder = append([]string(nil), fixOrder[1:]...)
+		delete(fixDomains, evicted)
+	}
+	fixDomains[host] = struct{}{}
+	fixOrder = append(fixOrder, host)
+	fixMu.Unlock()
+
+	if config.LogShow {
+		if evicted != "" {
+			log.Printf("[FIXDOMAINS]: list is full (%d): dropped oldest %s\n", fixMaxEntries, evicted)
+		}
+		log.Printf("[FIXDOMAINS]: %s -> TCP split from now on\n", host)
+	}
+}
+
+// Tìm vị trí tên miền SNI trong ClientHello. ok=false nếu không parse được
+func findSNIHost(d []byte) (start, n int, ok bool) {
+	// 5 (record) + 4 (handshake header) + 2 (version) + 32 (random) = 43
+	if len(d) < 44 || d[0] != 0x16 || d[5] != 0x01 {
+		return
+	}
+	p := 43
+	p += 1 + int(d[p]) // session id
+	if p+2 > len(d) {
+		return
+	}
+	p += 2 + int(binary.BigEndian.Uint16(d[p:])) // cipher suites
+	if p+1 > len(d) {
+		return
+	}
+	p += 1 + int(d[p]) // compression methods
+	if p+2 > len(d) {
+		return
+	}
+	extEnd := p + 2 + int(binary.BigEndian.Uint16(d[p:])) // hết vùng extensions
+	p += 2
+	if extEnd > len(d) {
+		extEnd = len(d)
+	}
+	for p+4 <= extEnd {
+		typ := binary.BigEndian.Uint16(d[p:])
+		extLen := int(binary.BigEndian.Uint16(d[p+2:]))
+		p += 4
+		if typ == 0x0000 { // extension server_name
+			// list length (2) + name type (1) + name length (2) + name
+			if p+5 > len(d) {
+				return
+			}
+			nameLen := int(binary.BigEndian.Uint16(d[p+3:]))
+			nameStart := p + 5
+			if nameLen < 2 || nameStart+nameLen > len(d) {
+				return
+			}
+			return nameStart, nameLen, true
+		}
+		p += extLen
+	}
+	return
+}
+
+// Chia ClientHello thành 2 TLS record, điểm cắt nằm giữa tên miền SNI.
+// boundary = vị trí kết thúc record 1 trong out.
+func recordFragment(d []byte) (out []byte, boundary int, ok bool) {
+	s, n, found := findSNIHost(d)
+	if !found || n < 2 {
+		return
+	}
+	recLen := int(binary.BigEndian.Uint16(d[3:5]))
+	if 5+recLen > len(d) { // record chưa đủ trong 1 lần Read
+		return
+	}
+	cut := s + n/2
+	if cut <= 5 || cut >= 5+recLen {
+		return
+	}
+	first := cut - 5
+	second := recLen - first
+
+	out = make([]byte, 0, len(d)+5)
+	out = append(out, d[0], d[1], d[2], byte(first>>8), byte(first))
+	out = append(out, d[5:cut]...)
+	boundary = len(out)
+	out = append(out, d[0], d[1], d[2], byte(second>>8), byte(second))
+	out = append(out, d[cut:]...)
+	return out, boundary, true
+}
+
+// Ngủ ngẫu nhiên 5 đến 25ms giữa các đoạn
+func bypassDelay() {
+	time.Sleep(time.Duration(5+rand.Intn(21)) * time.Millisecond)
+}
+
+// Điểm cắt TCP ngẫu nhiên trong 2 đến 5 byte đầu
+func splitPoint() int {
+	return 2 + rand.Intn(4)
+}
+
+// Ghi data thành nhiều đoạn, cắt tại các vị trí cuts, ngủ sau mỗi đoạn trừ đoạn cuối
+func writeInPieces(dest net.Conn, data []byte, cuts ...int) error {
+	prev := 0
+	for _, c := range cuts {
+		if _, err := dest.Write(data[prev:c]); err != nil {
 			return err
 		}
-		time.Sleep(time.Duration(5+rand.Intn(21)) * time.Millisecond)
-		_, err := dest.Write(data[splitPos:])
-		return err
+		bypassDelay()
+		prev = c
 	}
-	_, err := dest.Write(data)
+	_, err := dest.Write(data[prev:])
 	return err
 }
 
-func copyClientToDest(client, dest net.Conn, buf []byte) error {
+// Gửi gói đầu của kết nối để né DPI:
+//   - TLS ClientHello parse được SNI và tên đó không nằm trong danh sách fixDomains (RAM):
+//     Record fragmentation (viết lại thành 2 record) + cắt TCP.
+//   - TLS khác, parse SNI không được, hoặc domain nằm trong fixDomains: TCP split.
+//   - Không phải TLS: gửi nguyên.
+//
+// Trả về SNI nếu đã dùng record fragmentation (để tunnel theo dõi), ngược lại "".
+func writeFirstChunk(dest net.Conn, data []byte) (string, error) {
+	if len(data) <= 5 || data[0] != 0x16 {
+		_, err := dest.Write(data)
+		return "", err
+	}
+
+	host := ""
+	if s, n, ok := findSNIHost(data); ok {
+		host = strings.ToLower(string(data[s : s+n]))
+	}
+
+	if host == "" || !isFixDomain(host) {
+		if out, boundary, ok := recordFragment(data); ok {
+			if config.LogShow {
+				log.Printf("[BYPASS]: Record fragmentation -> %s\n", host)
+			}
+			return host, writeInPieces(dest, out, splitPoint(), boundary)
+		}
+	}
+
+	if config.LogShow {
+		log.Printf("[BYPASS]: TCP split -> %s\n", host)
+	}
+	return "", writeInPieces(dest, data, splitPoint())
+}
+
+func copyClientToDest(client, dest net.Conn, buf []byte, fragSNI *string) error {
 	n, rerr := client.Read(buf)
+
+	// Đọc bù cho đủ 1 TLS record trước khi cắt
+	if n >= 5 && buf[0] == 0x16 && rerr == nil {
+		need := 5 + int(binary.BigEndian.Uint16(buf[3:5]))
+		if need > n && need <= len(buf) {
+			m, err := io.ReadFull(client, buf[n:need])
+			n += m
+			rerr = err
+		}
+	}
+
 	if n > 0 {
-		if err := writeFirstChunk(dest, buf[:n]); err != nil {
+		sni, err := writeFirstChunk(dest, buf[:n])
+		*fragSNI = sni
+		if err != nil {
 			return err
 		}
 	}
+
 	if rerr != nil {
 		if rerr == io.EOF {
 			return nil
@@ -1412,8 +1627,6 @@ func tunnel(client *peekReaderConn, dest net.Conn) {
 		dest.Close()
 	}
 
-	// Đoạn goroutine này mục đích theo dõi idleTimeout, khi client đóng kết nối, thì dest cũng phải buộc đóng.
-	// Nếu không có goroutine này thì nhiều lúc client đóng, mà dest chưa đóng.
 	stop := make(chan struct{})
 	go func() {
 		select {
@@ -1426,20 +1639,34 @@ func tunnel(client *peekReaderConn, dest net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	go func() {
+	var (
+		fragSNI     string // chỉ goroutine client->dest ghi
+		downBytes   int64  // chỉ goroutine dest->client ghi
+		clientFirst bool   // client tự đóng trước
+	)
+	start := time.Now()
+
+	go func() { // dest -> client
 		defer wg.Done()
 		defer recoverAndKill("tunnel dest->client", killBoth)
-		if _, err := io.CopyBuffer(onlyWriter{client}, onlyReader{dest}, bufDown); err != nil {
+		n, err := io.CopyBuffer(onlyWriter{client}, onlyReader{dest}, bufDown)
+		downBytes = n
+		select {
+		case <-client.closed:
+			clientFirst = true
+		default:
+		}
+		if err != nil {
 			killBoth()
 			return
 		}
 		closeWrite(client)
 	}()
 
-	go func() {
+	go func() { // client -> dest
 		defer wg.Done()
 		defer recoverAndKill("tunnel client->dest", killBoth)
-		if err := copyClientToDest(client, dest, bufUp); err != nil {
+		if err := copyClientToDest(client, dest, bufUp, &fragSNI); err != nil {
 			killBoth()
 			return
 		}
@@ -1448,6 +1675,9 @@ func tunnel(client *peekReaderConn, dest net.Conn) {
 
 	wg.Wait()
 	close(stop)
+	if fragSNI != "" && downBytes == 0 && !clientFirst && time.Since(start) < fragFailMaxAge {
+		noteFragFailure(fragSNI)
+	}
 	killBoth()
 	bufferPool.Put(pUp)
 	bufferPool.Put(pDown)
@@ -1539,7 +1769,7 @@ func handleConnectDirect(c *peekReaderConn, rawTarget string) {
 	}
 
 	if config.LogShow {
-		log.Printf("[HTTP CONNECT] Established connection to %q (%s)\n", rawTarget, connectedAddr)
+		log.Printf("[HTTP CONNECT]: Established connection to %q (%s)\n", rawTarget, connectedAddr)
 	}
 
 	tunnel(c, destConn)
@@ -1668,7 +1898,7 @@ func handleWebSocketDirect(c *peekReaderConn, req *http.Request) {
 	}
 
 	if config.LogShow {
-		log.Printf("[HTTP WEBSOCKET] Handshake response status %d from %q (%s)\n", resp.StatusCode, rawHost, connectedAddr)
+		log.Printf("[HTTP WEBSOCKET]: Handshake response status %d from %q (%s)\n", resp.StatusCode, rawHost, connectedAddr)
 	}
 
 	if resp.StatusCode == http.StatusSwitchingProtocols {
@@ -1776,7 +2006,7 @@ func handleSocks5Direct(c *peekReaderConn) {
 	targetIPs, err := resolveDomainPriority(host)
 	if err != nil || len(targetIPs) == 0 {
 		if config.LogShow {
-			log.Printf("[SOCKS5 ERROR] DNS resolution failed for %q: %v\n", host, err)
+			log.Printf("[SOCKS5 ERROR]: DNS resolution failed for %q, %v\n", host, err)
 		}
 		socks5Reply(c, 0x04)
 		return
@@ -1787,7 +2017,7 @@ func handleSocks5Direct(c *peekReaderConn) {
 	cancel()
 	if err != nil {
 		if config.LogShow {
-			log.Printf("[SOCKS5 ERROR] Connect to %q failed: %v\n", host, err)
+			log.Printf("[SOCKS5 ERROR]: Connect to %q failed %v\n", host, err)
 		}
 		if errors.Is(err, errBlockedDestination) {
 			socks5Reply(c, 0x02)
@@ -1803,7 +2033,7 @@ func handleSocks5Direct(c *peekReaderConn) {
 	}
 
 	if config.LogShow {
-		log.Printf("[SOCKS5 CONNECT] Established TCP connection to %q (%s)\n", host, targetAddr)
+		log.Printf("[SOCKS5 CONNECT]: Established TCP connection to %q (%s)\n", host, targetAddr)
 	}
 
 	tunnel(c, destConn)
@@ -1872,6 +2102,7 @@ func handleSocks5UDP(c *peekReaderConn) {
 	defer udpListener.Close()
 
 	// Giá trị 4MB này chỉ có hiệu lực khi gán trần bằng hoặc cao hơn 4MB trong hệ thống
+	// Trên linux hay mac thì có thể cần phải gán, còn Windows tự động
 	// sysctl -w net.core.rmem_max=4194304
 	// sysctl -w net.core.wmem_max=4194304
 	_ = udpListener.SetReadBuffer(4 << 20)
@@ -1892,7 +2123,7 @@ func handleSocks5UDP(c *peekReaderConn) {
 	}
 
 	if config.LogShow {
-		log.Printf("[SOCKS5 UDP] Associate established, relay listening on %s\n", localAddr)
+		log.Printf("[SOCKS5 UDP]: Associate established, relay listening on %s\n", localAddr)
 	}
 
 	var (
@@ -1915,7 +2146,7 @@ func handleSocks5UDP(c *peekReaderConn) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[RECOVER] Panic in SOCKS5 UDP control watcher: %v\n", r)
+				log.Printf("[RECOVER]: Panic in SOCKS5 UDP control watcher %v\n", r)
 			}
 		}()
 		io.Copy(io.Discard, c)
@@ -1926,7 +2157,7 @@ func handleSocks5UDP(c *peekReaderConn) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[RECOVER] Panic in UDP target reader worker: %v\n", r)
+					log.Printf("[RECOVER]: Panic in UDP target reader worker %v\n", r)
 				}
 				tc.Close()
 				udpConnsMutex.Lock()
@@ -1993,7 +2224,7 @@ func handleSocks5UDP(c *peekReaderConn) {
 			default:
 				udpConnsMutex.Unlock()
 				if config.LogShow {
-					log.Printf("[UDP DROP] Global UDP target limit reached, dropping packet.\n")
+					log.Printf("[UDP DROP]: Global UDP target limit reached, dropping packet.\n")
 				}
 				return
 			}
@@ -2120,7 +2351,7 @@ func handleSocks5UDP(c *peekReaderConn) {
 			case udpResolveSem <- struct{}{}:
 			default:
 				if config.LogShow {
-					log.Printf("[UDP DROP] Too many pending DNS resolves, dropping packet for %q\n", targetHost)
+					log.Printf("[UDP DROP]: Too many pending DNS resolves, dropping packet for %q\n", targetHost)
 				}
 				continue
 			}
@@ -2132,7 +2363,7 @@ func handleSocks5UDP(c *peekReaderConn) {
 				defer func() { <-udpResolveSem }()
 				defer func() {
 					if r := recover(); r != nil {
-						log.Printf("[RECOVER] Panic in UDP background DNS resolve worker: %v\n", r)
+						log.Printf("[RECOVER]: Panic in UDP background DNS resolve worker: %v\n", r)
 					}
 				}()
 
@@ -2233,11 +2464,12 @@ func resolveDomainPriority(domain string) ([]string, error) {
 		return nil, err
 	}
 
-	// Lọc cấu hình local search domain dnsLocalDomain. Có khai báo sẽ xài DNS hệ thống, không có sẽ tắt để tránh leak
-	// Đáng lẽ là phải thắt chặt IP nào được phân giải cho cái đám trong dnsLocalDomain, mà chưa biết làm, kệ nó cứ dị đi
+	// Các local domain được khai báo trong dnsLocalDomain, sẽ được phân giải bởi IP DNS trong dnsLocalResolver.
+	// Khi không có dòng dnsLocalResolver, hoặc không có IP DNS, sẽ đưa xuống resolver hệ thống. Không cache.
+	// Các domain ngoài dnsLocalDomain vẫn theo quy tắc 4 cấp DoH > DoT > dnsIP > dnsFallback. Không được xuống resolver hệ thống.
 	if matchesLocalDomain(name) {
 		if config.LogShow {
-			log.Printf("[DNS SYSTEM] Domain %s matched local domain rules, resolving via system resolver\n", name)
+			log.Printf("[DNS LOCAL]: Domain %s matched local domain rules, resolving via local resolver\n", name)
 		}
 		return resolveBySystem(name)
 	}
@@ -2250,7 +2482,7 @@ func resolveDomainPriority(domain string) ([]string, error) {
 		if found && time.Now().Before(item.ExpireTime) {
 			if len(item.IPs) == 0 {
 				if config.LogShow {
-					log.Printf("[DNS NEGATIVE CACHE HIT] Domain %s is negative cached (Err: %v)\n", name, item.Err)
+					log.Printf("[DNS NEGATIVE CACHE HIT]: Domain %s is negative cached (Err: %v)\n", name, item.Err)
 				}
 				if item.Err != nil {
 					return nil, item.Err
@@ -2258,7 +2490,7 @@ func resolveDomainPriority(domain string) ([]string, error) {
 				return nil, errNXDomain
 			}
 			if config.LogShow {
-				log.Printf("[DNS CACHE HIT] Resolved %s -> [%s] from cache\n", name, strings.Join(item.IPs, " "))
+				log.Printf("[DNS CACHE HIT]: Resolved %s -> [%s] from cache\n", name, strings.Join(item.IPs, " "))
 			}
 			return item.IPs, nil
 		}
@@ -2332,7 +2564,7 @@ func storeDNSCache(name string, ips []string) {
 	currentCacheSize += itemSize
 
 	if config.LogShow {
-		log.Printf("[DNS CACHE STORE] Cached %s -> [%s] (Exp: %v)\n", name, strings.Join(ips, " "), config.DNSCacheExp)
+		log.Printf("[DNS CACHE STORE]: Cached %s -> [%s] (Exp: %v)\n", name, strings.Join(ips, " "), config.DNSCacheExp)
 	}
 }
 
@@ -2428,7 +2660,7 @@ func resolveDomainActual(domain string) ([]string, error) {
 			if time.Now().Before(exp) {
 				dnsBadMutex.Unlock()
 				if config.LogShow {
-					log.Printf("[DNS COOLDOWN] Skipping unhealthy DNS server %s (%s)\n", s.label, s.server)
+					log.Printf("[DNS COOLDOWN]: Skipping unhealthy DNS server %s (%s)\n", s.label, s.server)
 				}
 				continue
 			} else {
@@ -2441,9 +2673,9 @@ func resolveDomainActual(domain string) ([]string, error) {
 		ips, err := s.fn(s.server, domain)
 		if err == nil && len(ips) > 0 {
 			if config.LogShow {
-				log.Printf("[DNS SUCCESS] Resolved %s -> [%s] via %s (%s)\n", domain, strings.Join(ips, " "), s.label, s.server)
+				log.Printf("[DNS SUCCESS]: Resolved %s -> [%s] via %s (%s)\n", domain, strings.Join(ips, " "), s.label, s.server)
 				if s.plain {
-					log.Printf("[DNS WARNING] %s was resolved over unencrypted UDP DNS; your ISP may tamper with it\n", domain)
+					log.Printf("[DNS WARNING]: %s was resolved over unencrypted UDP DNS; your ISP may tamper with it\n", domain)
 				}
 			}
 			return ips, nil
@@ -2457,13 +2689,13 @@ func resolveDomainActual(domain string) ([]string, error) {
 			dnsBadServers[s.server] = time.Now().Add(10 * time.Second)
 			dnsBadMutex.Unlock()
 			if config.LogShow {
-				log.Printf("[DNS FAIL] Server %s (%s) failed: %v -> put on 10s cooldown\n", s.label, s.server, err)
+				log.Printf("[DNS FAIL]: Server %s (%s) failed: %v -> put on 10s cooldown\n", s.label, s.server, err)
 			}
 		}
 
 		if errors.Is(err, errNXDomain) {
 			if config.LogShow {
-				log.Printf("[DNS NXDOMAIN] Domain %s does not exist (verified by %s)\n", domain, s.label)
+				log.Printf("[DNS NXDOMAIN]: Domain %s does not exist (verified by %s)\n", domain, s.label)
 			}
 			return nil, errNXDomain
 		}
@@ -2493,7 +2725,7 @@ func runClientDNSHealthCheckWithInternal(domain string) {
 	check("Direct IP", config.DNSIP, queryUDP)
 	check("Fallback", config.DNSFallback, queryUDP)
 	if !dohOK && !dotOK {
-		fmt.Println("[WARNING] DoH/DoT desn't work: forward to UDP port 53")
+		fmt.Println("[WARNING]: DoH/DoT desn't work, forward to UDP port 53")
 	}
 }
 
@@ -2818,9 +3050,9 @@ func loadConfig(pathCfg string) {
 		ClientTimeout:    60 * time.Second,
 		DNSFallback:      "208.67.222.222",
 		DNSIP:            "8.8.4.4",
-		DNSDOH:           "https://1.1.1.1/dns-query",
-		DNSDOT:           "dns.quad9.net",
-		DNSForceIP:       "dns.google[8.8.8.8|8.8.4.4]; cloudflare-dns.com[104.16.249.249|104.16.248.249]",
+		DNSDOH:           "https://dns.google/dns-query",
+		DNSDOT:           "unfiltered.adguard-dns.com",
+		DNSForceIP:       "dns.google[8.8.8.8|8.8.4.4]; unfiltered.adguard-dns.com[94.140.14.140|94.140.14.141]",
 		DNSCache:         true,
 		DNSCacheSize:     1024 * 1024,
 		DNSCacheExp:      60 * time.Second,
@@ -2852,7 +3084,7 @@ func loadConfig(pathCfg string) {
 
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
-			log.Printf("[CONFIG] line %d ignored (expected key = value)\n", lineNo)
+			log.Printf("[CONFIG]: line %d ignored (expected key = value)\n", lineNo)
 			continue
 		}
 
@@ -2894,22 +3126,28 @@ func loadConfig(pathCfg string) {
 			config.AllowPrivateDest = val
 		case "dnslocaldomain":
 			config.DNSLocalDomain = val
+		case "dnslocalresolver":
+			config.DNSLocalResolver = val
+			dnsLocalResolvers = parseDNSLocalResolver(val)
+			if val != "" && len(dnsLocalResolvers) == 0 {
+				log.Printf("[CONFIG]: dnsLocalResolver = %q has no valid IP, treated as empty (local domains use system resolver)\n", val)
+			}
 		case "dnsforceip":
 			config.DNSForceIP = val
 			m := parseDNSForceIP(val)
 			if len(m) == 0 && val != "" {
-				log.Printf("[CONFIG] dnsForceIP = %q wrong or unvailable arguments: using default hard-code\n", val)
+				log.Printf("[CONFIG]: dnsForceIP = %q wrong or unvailable arguments, using default hard-code\n", val)
 				config.DNSForceIP = defDNSForceIP
 				m = parseDNSForceIP(defDNSForceIP)
 			}
 			dnsForceIP = m
 		default:
-			log.Printf("[CONFIG] line %d: unknown key %q ignored\n", lineNo, key)
+			log.Printf("[CONFIG]: line %d unknown key %q ignored\n", lineNo, key)
 		}
 	}
 }
 
-// dnsForceIP = dns.google[8.8.8.8|8.8.4.4]; cloudflare-dns.com[104.16.249.249|104.16.248.249]
+// dnsForceIP = dns.google[8.8.8.8|8.8.4.4]; unfiltered.adguard-dns.com[94.140.14.140|94.140.14.141]
 // Ngăn cách nhau bằng dấu ';'. Sai định dạng/IP sai sẽ bị bỏ qua và in log
 func parseDNSForceIP(val string) map[string][]string {
 	result := make(map[string][]string)
@@ -2920,12 +3158,12 @@ func parseDNSForceIP(val string) map[string][]string {
 		}
 		lb, rb := strings.IndexByte(entry, '['), strings.LastIndexByte(entry, ']')
 		if lb <= 0 || rb != len(entry)-1 || rb < lb {
-			log.Printf("[CONFIG] dnsForceIP: %q wrong format (domain[ip|ip])\n", entry)
+			log.Printf("[CONFIG]: dnsForceIP %q wrong format (domain[ip|ip])\n", entry)
 			continue
 		}
 		domain, err := normalizeDomain(entry[:lb])
 		if err != nil {
-			log.Printf("[CONFIG] dnsForceIP: domain %q is not useful\n", entry[:lb])
+			log.Printf("[CONFIG]: dnsForceIP domain %q is not useful\n", entry[:lb])
 			continue
 		}
 		var ips []string
@@ -2934,11 +3172,11 @@ func parseDNSForceIP(val string) map[string][]string {
 			if ip := net.ParseIP(raw); ip != nil {
 				ips = append(ips, ip.String())
 			} else if raw != "" {
-				log.Printf("[CONFIG] dnsForceIP: %s has IP %q wrong\n", domain, raw)
+				log.Printf("[CONFIG]: dnsForceIP %s has IP %q wrong\n", domain, raw)
 			}
 		}
 		if len(ips) == 0 {
-			log.Printf("[CONFIG] dnsForceIP: %s has no IP avaiable\n", domain)
+			log.Printf("[CONFIG]: dnsForceIP %s has no IP avaiable\n", domain)
 			continue
 		}
 		result[domain] = ips
@@ -2946,8 +3184,38 @@ func parseDNSForceIP(val string) map[string][]string {
 	return result
 }
 
-// Resolver hệ thống chỉ xài cho domain khớp dnsLocalDomain, không dùng cho các pha khác.
-// Vì vậy để dnsIP/dnsFallback hoạt động, phải là địa chỉ IP (kèm hoặc không kèm port), không được là domain,
+// Danh sách DNS server (thuần IP) riêng cho domain trong dnsLocalDomain
+// Giá trị sai, không IP hợp lệ (hoặc rỗng) thì chuyển xuống resolver hệ thống
+// Không cache
+var dnsLocalResolvers []string
+
+// dnsLocalResolver = 192.168.20.12; 192.168.20.251
+// Ngăn cách bằng ';' hoặc ','. Mỗi phần tử là IP, port không bắt buộc (mặc định 53). IPv6 kèm port phải có []: [::1]:53
+func parseDNSLocalResolver(val string) []string {
+	var result []string
+	seen := make(map[string]bool)
+	for _, item := range strings.Split(strings.ReplaceAll(val, ",", ";"), ";") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		host, port := splitHostPortDefault(item, "53")
+		ip := net.ParseIP(host)
+		if ip == nil {
+			log.Printf("[CONFIG]: dnsLocalResolver %q is not an IP, ignored\n", item)
+			continue
+		}
+		addr := net.JoinHostPort(ip.String(), port)
+		if seen[addr] {
+			continue
+		}
+		seen[addr] = true
+		result = append(result, addr)
+	}
+	return result
+}
+
+// Giá trị dnsIP/dnsFallback phải là IP thuần (không hiểu nữa thì thua đó)
 // Khai sai thì in log và dùng giá trị hard-code mặc định. Để trống = tắt server này.
 func ipServerOrDefault(key, val, def string) string {
 	if val == "" {
@@ -2955,7 +3223,7 @@ func ipServerOrDefault(key, val, def string) string {
 	}
 	host, _ := splitHostPortDefault(val, "53")
 	if net.ParseIP(host) == nil {
-		log.Printf("[CONFIG] %s = %q not an IP: using default hard-code %q\n", key, val, def)
+		log.Printf("[CONFIG]: %s = %q not an IP, using default hard-code %q\n", key, val, def)
 		return def
 	}
 	return val
@@ -2994,7 +3262,7 @@ func parseCacheSize(s string) int64 {
 	}
 	size, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 	if err != nil || size <= 0 {
-		log.Printf("[CONFIG] invalid dnsCacheSize, using default 1MB\n")
+		log.Printf("[CONFIG]: invalid dnsCacheSize, using default 1MB\n")
 		return def
 	}
 	return size * multiplier
@@ -3007,12 +3275,13 @@ func parseDuration(key, val string, current time.Duration) time.Duration {
 	if n, err := strconv.Atoi(val); err == nil && n >= 0 {
 		return time.Duration(n) * time.Second
 	}
-	log.Printf("[CONFIG] invalid duration for %s: %q (keeping %v)\n", key, val, current)
+	log.Printf("[CONFIG]: invalid duration for %s: %q (keeping %v)\n", key, val, current)
 	return current
 }
 
-// Lọc cấu hình local search domain dnsLocalDomain. Có khai báo sẽ xài DNS hệ thống, không có sẽ tắt để tránh leak
-// Đáng lẽ là phải thắt chặt IP nào được phân giải cho cái đám trong dnsLocalDomain, mà chưa biết làm, kệ nó cứ dị đi
+// Các local domain được khai báo trong dnsLocalDomain, sẽ được phân giải bởi IP DNS trong dnsLocalResolver.
+// Khi không có dòng dnsLocalResolver, hoặc không có IP DNS, sẽ đưa xuống resolver hệ thống. Không cache.
+// Các domain ngoài dnsLocalDomain vẫn theo quy tắc 4 cấp DoH > DoT > dnsIP > dnsFallback. Không được xuống resolver hệ thống.
 func matchesLocalDomain(domain string) bool {
 	if strings.TrimSpace(config.DNSLocalDomain) == "" {
 		return false
@@ -3038,9 +3307,46 @@ func matchesLocalDomain(domain string) bool {
 	return false
 }
 
-// Lọc cấu hình local search domain dnsLocalDomain. Có khai báo sẽ xài DNS hệ thống, không có sẽ tắt để tránh leak
-// Đáng lẽ là phải thắt chặt IP nào được phân giải cho cái đám trong dnsLocalDomain, mà chưa biết làm, kệ nó cứ dị đi
+// Các local domain được khai báo trong dnsLocalDomain, sẽ được phân giải bởi IP DNS trong dnsLocalResolver.
+// Khi không có dòng dnsLocalResolver, hoặc không có IP DNS, sẽ đưa xuống resolver hệ thống. Không cache.
+// Các domain ngoài dnsLocalDomain vẫn theo quy tắc 4 cấp DoH > DoT > dnsIP > dnsFallback. Không được xuống resolver hệ thống.
 func resolveBySystem(domain string) ([]string, error) {
+	if len(dnsLocalResolvers) > 0 {
+		return resolveByLocalResolvers(domain)
+	}
+	return resolveByOSResolver(domain)
+}
+
+// Phân giải bằng IP trong dnsLocalResolver cho local domain
+func resolveByLocalResolvers(domain string) ([]string, error) {
+	var lastErr error
+	for _, srv := range dnsLocalResolvers {
+		ips, err := queryUDP(srv, domain)
+		if err == nil && len(ips) > 0 {
+			if config.LogShow {
+				log.Printf("[DNS LOCAL RESOLVER]: Resolved %s -> [%s] via %s\n", domain, strings.Join(ips, " "), srv)
+			}
+			return interleaveFamilies(ips), nil
+		}
+		if errors.Is(err, errNXDomain) {
+			if config.LogShow {
+				log.Printf("[DNS LOCAL RESOLVER]: NXDOMAIN for %s (verified by %s)\n", domain, srv)
+			}
+			return nil, errNXDomain
+		}
+		if err == nil {
+			err = fmt.Errorf("no IP found for %s", domain)
+		}
+		lastErr = err
+		if config.LogShow {
+			log.Printf("[DNS LOCAL RESOLVER]: %s failed on %s: %v\n", domain, srv, err)
+		}
+	}
+	return nil, fmt.Errorf("unable to resolve local domain %s using dnsLocalResolver %v: %w", domain, dnsLocalResolvers, lastErr)
+}
+
+// Resolver hệ thống của OS: chỉ gọi khi dnsLocalResolver trống
+func resolveByOSResolver(domain string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultDNSTimeout)
 	defer cancel()
 
