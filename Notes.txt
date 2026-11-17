@@ -18,6 +18,10 @@ TCP split
 - Gửi đoạn 1, ngủ ngẫu nhiên 5 đến 25ms, rồi gửi đoạn 2.
 - Dữ liệu giữ nguyên, chỉ chia thành 2 segment TCP.
 
+Bổ sung cho Windows script `WINDOWS_PROXY_TOGGLE_v2.bat`. Chỉnh sửa, thay thế tên WiFi (SSID) phù hợp. Cách thức hoạt động:
+- Khi chạy script sẽ kích hoạt proxy
+- Khi bấm nút thoát (X) trên cửa sổ, nó sẽ tắt hay chuyển sang proxy khác phụ thuộc SSID của WiFi
+
 ### Tweaks (EN):
 Added the `dnsLocalResolver` parameter to strictly specify which DNS server resolves domains listed in `dnsLocalDomain`:
 - When the `dnsLocalResolver` line is missing or empty, resolution falls back to the system resolver.
@@ -36,3 +40,7 @@ TCP split
 - Randomly selects a cut position within the range of byte 2 to 5.
 - Sends segment 1, sleeps randomly for 5 to 25ms, then sends segment 2.
 - Data remains unchanged, simply split into 2 TCP segments.
+
+Enhance the Windows script `WINDOWS_PROXY_TOGGLE_v2.bat`. Edit and replace with the appropriate WiFi name (SSID). How it works:
+- Running the script will enable the proxy.
+- When clicking the close button (X) on the window, it will either disable the proxy or switch to another one depending on the WiFi SSID."
