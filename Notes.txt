@@ -21,6 +21,7 @@ TCP split
 Bổ sung cho Windows script `WINDOWS_PROXY_TOGGLE_v2.bat`. Chỉnh sửa, thay thế tên WiFi (SSID) phù hợp. Cách thức hoạt động:
 - Khi chạy script sẽ kích hoạt proxy
 - Khi bấm nút thoát (X) trên cửa sổ, nó sẽ tắt hay chuyển sang proxy khác phụ thuộc SSID của WiFi
+- Tính năng quản lý SSID này cần bật định vị trong `Windows Settings Privary Location`. Hãy đọc nội dung `.bat` trước khi quyết định xài hay không.
 
 ### Tweaks (EN):
 Added the `dnsLocalResolver` parameter to strictly specify which DNS server resolves domains listed in `dnsLocalDomain`:
@@ -43,4 +44,5 @@ TCP split
 
 Enhance the Windows script `WINDOWS_PROXY_TOGGLE_v2.bat`. Edit and replace with the appropriate WiFi name (SSID). How it works:
 - Running the script will enable the proxy.
-- When clicking the close button (X) on the window, it will either disable the proxy or switch to another one depending on the WiFi SSID."
+- When clicking the close button (X) on the window, it will either disable the proxy or switch to another one depending on the WiFi SSID.
+- This SSID management feature requires enabling Location services in Windows Settings. Read `.bat` before decide.
