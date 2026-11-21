@@ -72,9 +72,13 @@ https://www.virustotal.com/gui/file/a24746e82c547005eadbaae81c0b04ed54b40b0d29c3
 <img width="1823" height="777" alt="Windows VirusTotal" src="https://github.com/user-attachments/assets/3c41e36d-b912-4f51-a409-b3b7d73b3ff8" />
 
 ## Kết hợp ProxyBridge / Combining ProxyBridge
-Có nhiều trình khởi chạy game như Steam sẽ tự kết nối riêng mà không xài proxy https/http của Windows, tụi nó chạy qua tcp/udp riêng biệt. Vì vậy cần ép tụi nó bằng trình quản lý session tầng 5. Miễn phí thì có ProxyBridge, WinSocks, ... Trả phí thì Proxifier, ...
+Có nhiều trình khởi chạy game như Steam sẽ tự kết nối riêng mà không xài proxy https/http của Windows, tụi nó chạy qua tcp/udp riêng biệt. Vì vậy cần ép tụi nó bằng trình quản lý session tầng 5 + đổi DNS hệ thống.
 
-Many game launchers like Steam connect on their own without using HTTPS/HTTP Windows's proxies, running through separate TCP/UDP protocols. Therefore, it is necessary to force them using a layer-5 session manager. Free options include ProxyBridge, WinSocks, etc. Paid options include Proxifier, etc.
+Miễn phí thì có ProxyBridge, WinSocks, ... Trả phí thì Proxifier, ...
+
+Many game launchers like Steam connect on their own without using HTTPS/HTTP Windows's proxies, running through separate TCP/UDP protocols. Therefore, it is necessary to force them using a layer-5 session manager + set system DNS.
+
+Free options include ProxyBridge, WinSocks, etc. Paid options include Proxifier, etc.
 
 <img width="1323" height="1198" alt="1 0 0" src="https://github.com/user-attachments/assets/b62fc6af-b3dc-430f-841b-9ed24580a7eb" />
 
