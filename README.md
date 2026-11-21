@@ -4,13 +4,13 @@ Simplerxy - Một proxy đơn giản dễ xài, thoát tục
 Simplerxy - A simple, easy-to-use, lightweight proxy
 
 ## Mô tả / Describes
-Simplerxy - Một proxy đơn giản dễ xài, thoát tục được viết bằng Golang với sự giúp sức của Gemini. Nhu cầu chính của Simplerxy là giúp vượt lọc chặn dựa vào SNI/DPI của nhà mạng. Quan trọng: Simplerxy không chèn, làm sai lệch, cũng như không thu thập thông tin mã hóa HTTPS.
+Simplerxy - Một proxy đơn giản dễ xài, thoát tục được viết bằng Golang. Nhu cầu chính của Simplerxy là giúp vượt lọc chặn dựa vào SNI/DPI của nhà mạng. Quan trọng: Simplerxy không chèn, làm sai lệch, cũng như không thu thập thông tin mã hóa HTTPS.
 
 Nhưng mà, nếu mấy nhà mạng chặn dựa vào IP, chỉ còn cách xài VPN hay proxy của nước ngoài.
 
 Hỗ trợ các phương thức proxy: HTTP, HTTPS, SOCKS5 TCP, SOCKS5 UDP.
 
-Simplerxy - A simple, easy-to-use, lightweight proxy is written in Golang with the help from Gemini. Simplerxy helps bypass SNI/DPI filters from ISPs. Important: Simplerxy does not insert, false, nor does not collect encryption information HTTPS.
+Simplerxy - A simple, easy-to-use, lightweight proxy is written in Golang. Simplerxy helps bypass SNI/DPI filters from ISPs. Important: Simplerxy does not insert, false, nor does not collect encryption information HTTPS.
 
 However, if the ISPs blocks hard IPs, it is only possible to use VPN or proxy from abroad.
 
@@ -78,3 +78,7 @@ Many game launchers like Steam connect on their own without using HTTPS/HTTP Win
 
 <img width="1323" height="1198" alt="1 0 0" src="https://github.com/user-attachments/assets/b62fc6af-b3dc-430f-841b-9ed24580a7eb" />
 
+## Đa tạ / Credits
+Bởi tui không phải dân lập trình chuyên nghiệp, mà là học tới đâu mò tới đó, hỏi đồng nghiệp, dò A.I Gemini. Nên ai thấy ổn thì xài.
+
+I’m not a professional programmer; I just learn as I go—figuring things out, asking colleagues, and consulting AI tools like Gemini. So, feel free to use it if it works for you.
