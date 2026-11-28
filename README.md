@@ -1,7 +1,7 @@
 # Simplerxy
-Simplerxy - Một proxy đơn giản dễ xài, thoát tục
+Một proxy đơn giản dễ xài, thoát tục. Vượt chướng ngại vật DPI/SNI.
 
-Simplerxy - A simple, easy-to-use, lightweight proxy
+A simple, easy-to-use, lightweight proxy. Bypass DPI, bypass SNI.
 
 ## Mô tả / Describes
 Simplerxy - Một proxy đơn giản dễ xài, thoát tục được viết bằng Golang. Nhu cầu chính của Simplerxy là giúp vượt lọc chặn dựa vào SNI/DPI của nhà mạng. Quan trọng: Simplerxy không chèn, làm sai lệch, cũng như không thu thập thông tin mã hóa HTTPS.
